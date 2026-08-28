@@ -104,7 +104,9 @@ public class FortyFiveRuleTechnique : ISolvingTechnique
             }
         }
 
-        if (changed)
+        // ここは候補が1つ絞られるたびに呼ばれるホットパス。
+        // 既定では出力しない（SolverDiagnostics.VerboseLoggingを参照）。
+        if (changed && SolverDiagnostics.VerboseLogging)
         {
             System.Diagnostics.Debug.WriteLine(
                 $"[45Rule] Remaining={analysis.Remaining.Count}, " +

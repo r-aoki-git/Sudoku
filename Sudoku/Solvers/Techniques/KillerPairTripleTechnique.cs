@@ -143,11 +143,16 @@ public class KillerPairTripleTechnique : ISolvingTechnique
 
             if (changed)
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[KillerPairTriple] " +
-                    $"Cells={remaining.Count}, " +
-                    $"Assignments={analysis.Assignments.Count}, " +
-                    $"Digits={string.Concat(unionDigits.OrderBy(x => x))}");
+                // ここはケージごとに、候補が絞られるたびに呼ばれるホットパス。
+                // 既定では出力しない（SolverDiagnostics.VerboseLoggingを参照）。
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[KillerPairTriple] " +
+                        $"Cells={remaining.Count}, " +
+                        $"Assignments={analysis.Assignments.Count}, " +
+                        $"Digits={string.Concat(unionDigits.OrderBy(x => x))}");
+                }
 
                 return true;
             }

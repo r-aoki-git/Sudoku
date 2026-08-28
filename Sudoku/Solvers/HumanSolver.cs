@@ -41,9 +41,17 @@ public class HumanSolver
         new FishTechnique(3),
     };
 
+    /// <param name="targetDifficulty">
+    /// 生成処理から狙っている難易度が分かっている場合に指定する。
+    /// スコア・MaxLevelは求解が進むにつれて単調非減少のため、
+    /// 「これ以上進めても目標難易度には一致し得ない」と判明した時点で即座に打ち切る（枝刈り）。
+    /// 難易度判定を伴わない用途（「解答を見る」機能など）ではnullのままでよい。
+    /// </param>
     public HumanSolveResult Solve(
         Board board,
-        int timeBudgetMs = 1500)
+        int timeBudgetMs = 1500,
+        Difficulty? targetDifficulty = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(board);
 
@@ -51,6 +59,8 @@ public class HumanSolver
             throw new ArgumentOutOfRangeException(nameof(timeBudgetMs));
 
         var stopwatch = Stopwatch.StartNew();
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         var workingBoard = board.Clone();
 
@@ -67,6 +77,8 @@ public class HumanSolver
 
         while (!workingBoard.IsComplete())
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             // ---------------------------------------------------------
             // HumanSolver全体の時間制限
             // ---------------------------------------------------------
@@ -89,6 +101,8 @@ public class HumanSolver
 
             foreach (var technique in _techniques)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (stopwatch.ElapsedMilliseconds >= timeBudgetMs)
                 {
                     int remainingCells =
@@ -129,6 +143,29 @@ public class HumanSolver
                     candidates =
                         CandidateGrid.Calculate(
                             workingBoard);
+                }
+
+                // ---------------------------------------------------------
+                // 目標難易度による早期打ち切り（枝刈り）
+                // ---------------------------------------------------------
+                if (targetDifficulty.HasValue &&
+                    !DifficultyScorer.CanStillReach(
+                        targetDifficulty.Value,
+                        maxLevelUsed,
+                        usageByName))
+                {
+                    int remainingCells =
+                        CountRemainingCells(workingBoard);
+
+                    return new HumanSolveResult(
+                        Solved: false,
+                        RequiredFallback: false,
+                        FallbackSolved: false,
+                        MaxLevelUsed: maxLevelUsed,
+                        RemainingCells: remainingCells,
+                        TechniqueUsageCounts: usageCounts,
+                        TechniqueUsageByName: usageByName,
+                        EarlyRejected: true);
                 }
 
                 break;

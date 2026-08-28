@@ -146,7 +146,8 @@ public static (
         Board board,
         CandidateGrid candidates,
         IReadOnlyList<(int Row, int Col)> cells,
-        int targetSum)
+        int targetSum,
+        CancellationToken cancellationToken = default)
     {
         var remaining = new List<(int Row, int Col)>();
 
@@ -223,7 +224,8 @@ public static (
             orderedCandidates,
             order,
             current,
-            assignments);
+            assignments,
+            cancellationToken);
 
         return new CageAnalysis(remaining, assignments);
     }
@@ -236,8 +238,11 @@ public static (
         int[][] candidates,
         int[] order,
         int[] current,
-        List<IReadOnlyList<int>> results)
+        List<IReadOnlyList<int>> results,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (depth == candidates.Length)
         {
             if (currentSum == targetSum)
@@ -312,7 +317,8 @@ public static (
                 candidates,
                 order,
                 current,
-                results);
+                results,
+                cancellationToken);
 
             usedDigits[digit] = false;
         }

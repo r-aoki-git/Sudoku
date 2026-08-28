@@ -1,5 +1,6 @@
 ﻿using Sudoku.Models;
 using System.Collections.Concurrent;
+using System.Threading;
 using System.Windows.Controls;
 
 namespace Sudoku.Solvers;
@@ -17,6 +18,8 @@ public class KillerBacktrackingSolver
     private const int FullMask = 0b1_1111_1111; // digit 1 ～ 9 → bit 0 ～ 8
 
     private readonly List<Cage> _cages;
+    private CancellationToken _cancellationToken;
+
     private static readonly ConcurrentDictionary<(int Size, int Sum), List<int>> ComboMaskCache = new();
 
     private int[,] _grid = new int[Board.Size, Board.Size];
@@ -159,7 +162,12 @@ public class KillerBacktrackingSolver
     /// このケージ配置は見込みが薄いと判断して深い探索を行わずに見切った場合。
     /// -1・-2どちらも、呼び出し側は「不合格・リトライ」として扱えばよい。
     /// </summary>
-    public int CountSolutions(Board board, int limit = 2, int timeBudgetMs = 5000)
+    public int CountSolutions(
+        Board board,
+        int limit = 2,
+        int timeBudgetMs = 5000,
+        int minFilledAfterPropagation = 45,
+        CancellationToken cancellationToken = default)
     {
         LoadFromBoard(board);
         _stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -215,7 +223,16 @@ public class KillerBacktrackingSolver
     // ====== 唯一解の探索（見つけたらそこで終了） ======
     private bool SolveOne()
     {
+        if (_stopwatch is null)
+            throw new InvalidOperationException("Stopwatch is not initialized.");
+
         if (TimeIsUp())
+        {
+            _aborted = true;
+            return false;
+        }
+
+        if (_cancellationToken.IsCancellationRequested)
         {
             _aborted = true;
             return false;

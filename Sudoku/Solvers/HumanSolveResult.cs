@@ -10,4 +10,5 @@ public record HumanSolveResult(
     int MaxLevelUsed,
     int RemainingCells,
     IReadOnlyDictionary<int, int> TechniqueUsageCounts,
-    IReadOnlyDictionary<string, int> TechniqueUsageByName);
+    IReadOnlyDictionary<string, int> TechniqueUsageByName,
+    bool EarlyRejected = false);

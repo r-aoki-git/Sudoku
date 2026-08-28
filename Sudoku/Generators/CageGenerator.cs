@@ -51,7 +51,11 @@ public sealed class CageGenerator
         _random = random ?? new Random();
     }
 
-    public List<Cage> GenerateCages(Board solvedBoard, Difficulty difficulty, int budgetMs = 500)
+    public List<Cage> GenerateCages(
+    Board solvedBoard,
+    Difficulty difficulty,
+    int budgetMs = 500,
+    CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(solvedBoard);
 
@@ -66,6 +70,8 @@ public sealed class CageGenerator
         int effectiveBudgetMs = Math.Max(1, budgetMs);
         int maxSingles = GetMaxSingles(difficulty);
 
+        cancellationToken.ThrowIfCancellationRequested();
+
         // サイズ計画を固定しない。
         // 各時点の残り領域に対して、実行可能なサイズだけを重み付きで選ぶ。
         // これが盤面形状による詰みを大幅に減らす。
@@ -79,7 +85,15 @@ public sealed class CageGenerator
 
             var cages = new List<List<int>>();
 
-            if (TryPartition(unassigned, digits, weights, cages, stopwatch, effectiveBudgetMs, maxSingles))
+            if (TryPartition(
+                unassigned,
+                digits,
+                weights,
+                cages,
+                stopwatch,
+                effectiveBudgetMs,
+                maxSingles,
+                cancellationToken))
             {
                 var result = CreateCages(cages, digits);
                 WriteDebugInfo(result);
@@ -133,11 +147,14 @@ public sealed class CageGenerator
         List<List<int>> cages,
         Stopwatch stopwatch,
         int budgetMs,
-        int maxSingles)
+        int maxSingles,
+        CancellationToken cancellationToken)
     {
 
         while (!IsBudgetExceeded(stopwatch, budgetMs))
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             int remaining = unassigned.Count(x => x);
 
             if (remaining == 0)
@@ -182,7 +199,8 @@ public sealed class CageGenerator
                             unassigned,
                             digits,
                             stopwatch,
-                            budgetMs);
+                            budgetMs,
+                            cancellationToken);
 
                     foreach (var cage in cageCandidates)
                     {
@@ -458,7 +476,8 @@ public sealed class CageGenerator
         bool[] unassigned,
         int[] digits,
         Stopwatch stopwatch,
-        int budgetMs)
+        int budgetMs,
+        CancellationToken cancellationToken)
     {
         var results = new List<List<int>>(MaxCageCandidates);
         var seen = new HashSet<string>();
@@ -479,7 +498,8 @@ public sealed class CageGenerator
             seen,
             stopwatch,
             budgetMs,
-            randomize: true);
+            randomize: true,
+            cancellationToken);
 
         // ランダム探索で見つからなかった場合のみ決定的探索
         if (results.Count == 0 &&
@@ -501,7 +521,8 @@ public sealed class CageGenerator
                 seen,
                 stopwatch,
                 budgetMs,
-                randomize: false);
+                randomize: false,
+                cancellationToken);
         }
 
         results.Sort((a, b) =>
@@ -524,10 +545,13 @@ public sealed class CageGenerator
         HashSet<string> seen,
         Stopwatch stopwatch,
         int budgetMs,
-        bool randomize)
+        bool randomize,
+        CancellationToken cancellationToken)
     {
         if (results.Count >= MaxCageCandidates)
             return;
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (IsBudgetExceeded(stopwatch, budgetMs))
             return;
@@ -631,7 +655,8 @@ public sealed class CageGenerator
                 seen,
                 stopwatch,
                 budgetMs,
-                randomize);
+                randomize,
+                cancellationToken);
         }
 
         cage.RemoveAt(cage.Count - 1);
@@ -790,6 +815,9 @@ public sealed class CageGenerator
 
     private static void WriteDebugInfo(List<Cage> cages)
     {
+        if (!SolverDiagnostics.VerboseLogging)
+            return;
+
         var sizeCounts =
             cages
                 .GroupBy(c => c.Cells.Count)

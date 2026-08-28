@@ -37,14 +37,16 @@ namespace Sudoku
                 {
                     try
                     {
-                        var generator =
-                            new KillerSudokuGenerator();
-
                         var stopwatch =
                             System.Diagnostics.Stopwatch.StartNew();
 
                         var (solution, cages) =
-                            generator.Generate(requestedDifficulty);
+                            ParallelKillerSudokuGenerator.Generate(
+                                requestedDifficulty,
+                                workerCount: 4,
+                                overallTimeoutMs: 20000,
+                                perAttemptBudgetMs: 4000,
+                                maxEscalations: 1);
 
                         stopwatch.Stop();
 
