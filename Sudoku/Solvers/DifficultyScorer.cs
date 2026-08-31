@@ -40,21 +40,23 @@ public class DifficultyScorer
         ["Naked Single"] = 0,
         ["Hidden Single"] = 1,
 
-        // キラー固有
+        // キラー固有 Level 1
         ["Cage Forced Combination"] = 0,
-        ["45 Rule (Single Unit)"] = 8,
+
+        // Level 2
+        ["45 Rule (Single Unit)"] = 5,
 
         // Level 3
-        ["Locked Candidates"] = 4,
-        ["Killer Locked Candidates"] = 8,
-        ["Innie / Outie"] = 10,
-        ["Killer Pair / Triple"] = 12,
+        ["Locked Candidates"] = 3,
+        ["Killer Locked Candidates"] = 5,
+        ["Innie / Outie"] = 6,
+        ["Killer Pair / Triple"] = 8,
 
         // Subsets
-        ["Naked Pair"] = 4,
-        ["Naked Triple"] = 8,
-        ["Hidden Pair"] = 6,
-        ["Hidden Triple"] = 12,
+        ["Naked Pair"] = 3,
+        ["Naked Triple"] = 5,
+        ["Hidden Pair"] = 4,
+        ["Hidden Triple"] = 6,
 
         // Level 4
         ["X-Wing"] = 20,

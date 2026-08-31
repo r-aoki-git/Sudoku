@@ -8,25 +8,25 @@ namespace Sudoku.Generators;
 /// KillerSudokuGeneratorを複数スレッドで並列に走らせ、最初に成功した結果を採用する。
 ///
 /// 【設計上の注意】
-/// KillerSudokuGeneratorは本来、「1つの完成盤面に対してケージ構造を何十〜何百回も
-/// 振り直す」ことで効率よく試行回数を稼ぐ設計になっている（内部のRegenerateSolutionAfter
-/// ロジック）。完成盤面のバックトラック生成はケージ振り直しよりコストが高いため、
-/// 1つの盤面をなるべく使い回すことが速度上重要になる。
+/// 各WorkerはKillerSudokuGeneratorを1つだけ保持する。
+/// KillerSudokuGenerator内部では、1つの完成盤面に対してケージ構造を何度も試行し、
+/// 一定回数に達した場合のみ完成盤面を作り直す。
 ///
-/// そのためこのクラスは、各ワーカーに「ある程度まとまった」予算（PerAttemptBudgetMs）を
-/// 与えたKillerSudokuGeneratorを繰り返し使い捨てにする。予算が短すぎると、1回のミニ試行が
-/// 「完成盤面を1つ作って、ケージ振り直しをほんの数回試しただけで時間切れ」になり、
-/// 盤面再利用のメリットをほとんど活かせないまま高コストな盤面生成を繰り返すことになる。
-/// PerAttemptBudgetMsは、この「使い回しの効率」と「他ワーカーの成功への追従速度
-/// （cts.Cancelへの反応の速さ）」のトレードオフを取るパラメータ。
+/// Worker単位のGenerate()呼び出しにはPerAttemptBudgetMsを設定するが、
+/// Generate()が時間切れになってもGenerator自体は破棄しない。
+/// そのため、次のGenerate()呼び出しでは前回の完成盤面をそのまま再利用できる。
+///
+/// これにより、完成盤面生成という高コストな処理を毎回やり直すことを防ぎ、
+/// Workerごとの試行効率を維持する。
+///
+/// 【並列実行】
+/// 各Workerは独立したRandom・Generator・完成盤面を持つ。
+/// いずれか1つが成功した時点でCancellationTokenをキャンセルし、
+/// 残りのWorkerを停止する。
 ///
 /// 【エスカレーション】
-/// 出現率が低い難易度・パラメータの組み合わせでは、指定したoverallTimeoutMsを
-/// 使い切っても見つからないことがある（確率的な事象なので、時間を伸ばせば
-/// 成功率は上がるが、ゼロにはならない）。そのため、1回目のタイムアウトで
-/// 諦めず、予算を広げて自動的に再挑戦する。典型的な成功パターンでは
-/// 1回目の（短い）予算内であっさり見つかるため、エスカレーションは
-/// 「保険」として働き、通常ケースの速度には影響しない。
+/// 指定したoverallTimeoutMs以内に成功しなかった場合はRoundを終了し、
+/// 次のRoundではoverallTimeoutMsを1.5倍にして再挑戦する。
 /// </summary>
 public static class ParallelKillerSudokuGenerator
 {
@@ -35,7 +35,7 @@ public static class ParallelKillerSudokuGenerator
     private const int DefaultMaxEscalations = 1;
     private const double EscalationMultiplier = 1.5;
 
-    private const int DefaultWorkerCount = 6;
+    private const int DefaultWorkerCount = 4;
 
     public static (Board Solution, List<Cage> Cages) Generate(
         Difficulty difficulty,
@@ -107,80 +107,124 @@ public static class ParallelKillerSudokuGenerator
         int overallTimeoutMs,
         int perAttemptBudgetMs)
     {
-        var overallStopwatch = Stopwatch.StartNew();
-        using var cts = new CancellationTokenSource(overallTimeoutMs);
+        var overallStopwatch =
+            Stopwatch.StartNew();
 
-        var allTasks = new Task<(Board Solution, List<Cage> Cages)?>[workers];
+        using var cts =
+            new CancellationTokenSource(overallTimeoutMs);
+
+        var allTasks =
+            new Task<(Board Solution, List<Cage> Cages)?>[workers];
 
         for (int i = 0; i < workers; i++)
         {
-            allTasks[i] = Task.Factory.StartNew(
-                () => RunWorker(
-                    difficulty,
-                    overallStopwatch,
-                    overallTimeoutMs,
-                    perAttemptBudgetMs,
-                    cts.Token),
-                CancellationToken.None,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default);
+            allTasks[i] =
+                Task.Factory.StartNew(
+                    () => RunWorker(
+                        difficulty,
+                        overallStopwatch,
+                        overallTimeoutMs,
+                        perAttemptBudgetMs,
+                        cts.Token),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
         }
+
+        var pending =
+            allTasks.Cast<Task>().ToArray();
 
         try
         {
-            var pending = allTasks.ToList();
-
-            while (pending.Count > 0)
+            while (pending.Length > 0)
             {
-                int index = Task.WaitAny(pending.ToArray());
-                var completed = pending[index];
+                int index =
+                    Task.WaitAny(
+                        pending,
+                        100);
 
-                if (completed.Result is { } result)
+                if (index < 0)
+                {
+                    if (cts.IsCancellationRequested)
+                        break;
+
+                    continue;
+                }
+
+                var completed =
+                    (Task<(Board Solution, List<Cage> Cages)?>)
+                        pending[index];
+
+                if (completed.IsCompletedSuccessfully &&
+                    completed.Result is { } result)
                 {
                     // 勝者確定。
-                    // ここで全ワーカーに停止要求を出す。
                     cts.Cancel();
 
+                    Debug.WriteLine(
+                        $"[ParallelWinner] " +
+                        $"RoundElapsed={overallStopwatch.ElapsedMilliseconds}ms");
+
+                    // -----------------------------------------------------
                     // 重要：
-                    // 勝者以外のLongRunningワーカーが完全終了するまで待つ。
-                    // これを行わないと、次のRoundや次の生成処理とCPUを奪い合う。
+                    // 勝者以外のWorkerが完全終了してから返す。
+                    //
+                    // ただし無制限に待たず、協調キャンセルが効かない
+                    // Workerが存在する場合でも最大2秒で切り上げる。
+                    // -----------------------------------------------------
                     try
                     {
-                        Task.WaitAll(allTasks);
+                        Task.WaitAll(
+                            allTasks,
+                            millisecondsTimeout: 2000);
                     }
                     catch (AggregateException)
                     {
-                        // OperationCanceledException / InvalidOperationException
-                        // は各ワーカー側で処理済みなので、ここでは無視する。
+                        // Worker側で処理済み。
                     }
-
-                    Debug.WriteLine(
-                        $"[ParallelRoundSuccess] " +
-                        $"RoundElapsed={overallStopwatch.ElapsedMilliseconds}ms");
 
                     return result;
                 }
 
-                pending.RemoveAt(index);
+                pending =
+                    pending
+                        .Where(task =>
+                            !ReferenceEquals(task, completed))
+                        .ToArray();
             }
-        }
-        finally
-        {
-            // タイムアウト・例外時も全ワーカーを確実に停止する。
+
             cts.Cancel();
 
             try
             {
-                Task.WaitAll(allTasks);
+                Task.WaitAll(
+                    allTasks,
+                    millisecondsTimeout: 2000);
             }
             catch (AggregateException)
             {
-                // ワーカー側のキャンセル・失敗例外はここでは無視する。
+                // Worker側で処理済み。
+            }
+
+            throw new InvalidOperationException(
+                $"並列 {workers} ワーカーとも " +
+                $"{overallTimeoutMs}ms 以内に成功しませんでした。");
+        }
+        finally
+        {
+            cts.Cancel();
+
+            try
+            {
+                Task.WaitAll(
+                    allTasks,
+                    millisecondsTimeout: 2000);
+            }
+            catch (AggregateException)
+            {
+                // Worker側で処理済み。
             }
         }
-
-        throw new InvalidOperationException(
-            $"並列 {workers} ワーカーとも {overallTimeoutMs}ms 以内に成功しませんでした。");
     }
 
     private static (Board Solution, List<Cage> Cages)? RunWorker(
@@ -190,7 +234,11 @@ public static class ParallelKillerSudokuGenerator
         int perAttemptBudgetMs,
         CancellationToken cancellationToken)
     {
-        var workerStopwatch = Stopwatch.StartNew();
+        var workerStopwatch =
+            Stopwatch.StartNew();
+
+        var generator =
+            new KillerSudokuGenerator();
 
         long workerStartAt =
             roundStopwatch.ElapsedMilliseconds;
@@ -205,59 +253,34 @@ public static class ParallelKillerSudokuGenerator
 
         try
         {
-            while (roundStopwatch.ElapsedMilliseconds < overallTimeoutMs)
+            while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                try
+                if (roundStopwatch.ElapsedMilliseconds >= overallTimeoutMs)
                 {
-                    var generator =
-                        new KillerSudokuGenerator(
-                            overallBudgetMs: perAttemptBudgetMs);
+                    return null;
+                }
 
-                    var result =
-                        generator.Generate(
-                            difficulty,
-                            cancellationToken);
+                var result =
+                    generator.TryGenerate(
+                        difficulty,
+                        perAttemptBudgetMs,
+                        cancellationToken);
 
+                if (result is { } success)
+                {
                     workerStopwatch.Stop();
-
-                    long workerElapsed =
-                        workerStopwatch.ElapsedMilliseconds;
-
-                    long roundElapsed =
-                        roundStopwatch.ElapsedMilliseconds;
 
                     Debug.WriteLine(
                         $"[WorkerSuccess] " +
                         $"Thread={threadId}, " +
-                        $"WorkerElapsed={workerElapsed}ms, " +
-                        $"RoundElapsed={roundElapsed}ms");
+                        $"WorkerElapsed={workerStopwatch.ElapsedMilliseconds}ms, " +
+                        $"RoundElapsed={roundStopwatch.ElapsedMilliseconds}ms");
 
-                    return result;
-                }
-                catch (InvalidOperationException)
-                {
-                    if (SolverDiagnostics.VerboseLogging)
-                    {
-                        Debug.WriteLine(
-                            $"[WorkerRetry] " +
-                            $"Thread={threadId}, " +
-                            $"WorkerElapsed={workerStopwatch.ElapsedMilliseconds}ms, " +
-                            $"RoundElapsed={roundStopwatch.ElapsedMilliseconds}ms");
-                    }
+                    return success;
                 }
             }
-
-            workerStopwatch.Stop();
-
-            Debug.WriteLine(
-                $"[WorkerTimeout] " +
-                $"Thread={threadId}, " +
-                $"WorkerElapsed={workerStopwatch.ElapsedMilliseconds}ms, " +
-                $"RoundElapsed={roundStopwatch.ElapsedMilliseconds}ms");
-
-            return null;
         }
         catch (OperationCanceledException)
         {

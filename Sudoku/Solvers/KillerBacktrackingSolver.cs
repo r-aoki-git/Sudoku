@@ -138,21 +138,34 @@ public class KillerBacktrackingSolver
             checkpoint.GridTrailCount);
     }
 
-    public KillerBacktrackingSolver(List<Cage> cages)
+    public KillerBacktrackingSolver(
+        List<Cage> cages,
+        CancellationToken cancellationToken = default)
     {
         _cages = cages;
+        _cancellationToken = cancellationToken;
     }
 
     /// <summary>盤面を解いて埋める。解けたらtrue。</summary>
-    public bool TrySolve(Board board, int timeBudgetMs = 5000)
+    public bool TrySolve(
+        Board board,
+        int timeBudgetMs = 5000,
+        CancellationToken cancellationToken = default)
     {
+        _cancellationToken = cancellationToken;
+
         LoadFromBoard(board);
         _stopwatch = System.Diagnostics.Stopwatch.StartNew();
         _timeBudgetMs = timeBudgetMs;
         _aborted = false;
 
+        _cancellationToken.ThrowIfCancellationRequested();
+
         bool solved = SolveOne();
-        if (solved) WriteBackToBoard(board);
+
+        if (solved)
+            WriteBackToBoard(board);
+
         return solved;
     }
 
@@ -169,10 +182,14 @@ public class KillerBacktrackingSolver
         int minFilledAfterPropagation = 45,
         CancellationToken cancellationToken = default)
     {
+        _cancellationToken = cancellationToken;
+
         LoadFromBoard(board);
         _stopwatch = System.Diagnostics.Stopwatch.StartNew();
         _timeBudgetMs = timeBudgetMs;
         _aborted = false;
+
+        _cancellationToken.ThrowIfCancellationRequested();
 
         if (!Propagate())
             return _aborted ? -1 : 0; // 矛盾（そもそも成立しないケージ配置）
@@ -180,6 +197,9 @@ public class KillerBacktrackingSolver
         int filled = CountFilledCells();
         if (filled == Board.Size * Board.Size)
             return 1; // 制約伝播だけで完成=唯一解が確定
+
+        if (filled < minFilledAfterPropagation)
+            return -2;
 
         int count = 0;
         CountAll(limit, ref count);
@@ -273,7 +293,14 @@ public class KillerBacktrackingSolver
     // ====== 解の個数を数える（limit件まで） ======
     private void CountAll(int limit, ref int count)
     {
-        if (_aborted || count >= limit) return;
+        if (_aborted || count >= limit)
+            return;
+
+        if (_cancellationToken.IsCancellationRequested)
+        {
+            _aborted = true;
+            return;
+        }
 
         if (TimeIsUp())
         {
@@ -316,7 +343,25 @@ public class KillerBacktrackingSolver
         Restore(checkpoint);
     }
 
-    private bool TimeIsUp() => _stopwatch != null && _stopwatch.ElapsedMilliseconds > _timeBudgetMs;
+    private bool TimeIsUp()
+    {
+        if (_cancellationToken.IsCancellationRequested)
+        {
+            _aborted = true;
+            return true;
+        }
+
+        if (_stopwatch is null)
+            return false;
+
+        if (_stopwatch.ElapsedMilliseconds >= _timeBudgetMs)
+        {
+            _aborted = true;
+            return true;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// 「候補が1つに絞れたマスを確定する」を、これ以上進展しなくなるまで繰り返す（制約伝播）。

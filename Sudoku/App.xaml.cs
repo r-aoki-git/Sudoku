@@ -18,7 +18,7 @@ namespace Sudoku
 
             var scorer = new DifficultyScorer();
 
-            const int TestCount = 5;
+            const int TestCount = 1;
 
             foreach (var requestedDifficulty in new[]
             {
@@ -44,8 +44,8 @@ namespace Sudoku
                             ParallelKillerSudokuGenerator.Generate(
                                 requestedDifficulty,
                                 workerCount: 4,
-                                overallTimeoutMs: 20000,
-                                perAttemptBudgetMs: 4000,
+                                overallTimeoutMs: 10000,
+                                perAttemptBudgetMs: 2000,
                                 maxEscalations: 1);
 
                         stopwatch.Stop();

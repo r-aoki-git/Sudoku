@@ -9,7 +9,17 @@ namespace Sudoku.Solvers;
 /// </summary>
 public class KillerHumanSolver : HumanSolver
 {
-    public KillerHumanSolver(List<Cage> cages) : base(BuildTechniques(cages), board => new KillerBacktrackingSolver(cages).TrySolve(board))
+    public KillerHumanSolver(List<Cage> cages)
+        : base(
+            BuildTechniques(cages),
+            (board, cancellationToken) =>
+                new KillerBacktrackingSolver(
+                    cages,
+                    cancellationToken)
+                    .TrySolve(
+                        board,
+                        timeBudgetMs: 5000,
+                        cancellationToken: cancellationToken))
     {
     }
 

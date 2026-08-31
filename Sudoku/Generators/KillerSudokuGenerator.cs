@@ -1,4 +1,4 @@
-﻿using Sudoku.Models;
+using Sudoku.Models;
 using Sudoku.Solvers;
 using System.Diagnostics;
 
@@ -14,129 +14,158 @@ namespace Sudoku.Generators;
 /// </summary>
 public class KillerSudokuGenerator
 {
-    public const int DefaultOverallBudgetMs = 10000; // 生成処理全体に許す時間の上限（10秒。制約伝播により通常はごく短時間で収まるはず）
-    private const int MinAttemptBudgetMs = 50; // 1回の検証に最低限確保する時間
-    private const int CageBudgetMs = 300;
+    public const int DefaultOverallBudgetMs = 10000;
+    private const int MinAttemptBudgetMs = 50;
+
+    // Union-Find方式のケージ生成は非常に高速（< 1ms）なので、
+    // ケージ生成に割り当てる予算はごく小さくてよい。
+    private const int CageBudgetMs = 100;
+
+    // 難易度判定に使う予算
     private const int HumanBudgetMs = 1500;
 
-    private readonly int _overallBudgetMs;
     private readonly Random _random;
     private readonly BacktrackingSolver _solver;
     private readonly CageGenerator _cageGenerator;
     private readonly DifficultyScorer _difficultyScorer;
 
-    public KillerSudokuGenerator(Random? random = null, int overallBudgetMs = DefaultOverallBudgetMs)
-    {
-        if (overallBudgetMs <= 0)
-            throw new ArgumentOutOfRangeException(nameof(overallBudgetMs));
+    private Board? _solution;
+    private int _attemptsSinceNewSolution;
+    private int _totalAttempts;
+    private int _solutionRegenerations;
 
+    // 新しいCageGeneratorは高速に多様なケージ構造を生成できるため、
+    // 同じ完成盤面でより多くのケージ構造を試行できる。
+    private const int RegenerateSolutionAfter = 500;
+
+    public KillerSudokuGenerator(Random? random = null)
+    {
         _random = random ?? new Random();
         _solver = new BacktrackingSolver(_random);
         _cageGenerator = new CageGenerator(_random);
         _difficultyScorer = new DifficultyScorer();
-        _overallBudgetMs = overallBudgetMs;
     }
 
-    /// <summary>完成盤面（正解）とケージ分割の両方を返す。</summary>
-    public (Board Solution, List<Cage> Cages) Generate(
+    /// <summary>
+    /// 指定予算内で1回の生成を試みる。
+    /// 予算切れは通常の失敗なので例外を投げず、nullを返す。
+    /// CancellationTokenのキャンセルだけは例外として扱う。
+    /// </summary>
+    public (Board Solution, List<Cage> Cages)? TryGenerate(
         Difficulty difficulty,
+        int budgetMs,
         CancellationToken cancellationToken = default)
     {
-        var overallStopwatch = System.Diagnostics.Stopwatch.StartNew();
+        if (budgetMs <= 0)
+            throw new ArgumentOutOfRangeException(nameof(budgetMs));
 
-        Board? solution = null;
-        int attemptsSinceNewSolution = 0;
-        int totalAttempts = 0;
-        int solutionRegenerations = 0;
-        const int RegenerateSolutionAfter = 200;
+        var overallStopwatch =
+            System.Diagnostics.Stopwatch.StartNew();
 
-        while (overallStopwatch.ElapsedMilliseconds < _overallBudgetMs)
+        cancellationToken.ThrowIfCancellationRequested();
+
+        while (overallStopwatch.ElapsedMilliseconds < budgetMs)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (solution is null || attemptsSinceNewSolution >= RegenerateSolutionAfter)
+            if (_solution is null ||
+                _attemptsSinceNewSolution >= RegenerateSolutionAfter)
             {
-                solution = new Board();
-                solutionRegenerations++;
-                if (!_solver.TryGenerateFullGrid(solution))
+                _solution = new Board();
+
+                _solutionRegenerations++;
+
+                if (!_solver.TryGenerateFullGrid(
+                        _solution,
+                        cancellationToken))
                 {
-                    solution = null;
+                    _solution = null;
                     continue;
                 }
-                attemptsSinceNewSolution = 0;
+
+                _attemptsSinceNewSolution = 0;
             }
 
-            long remaining = _overallBudgetMs - overallStopwatch.ElapsedMilliseconds;
+            long remaining =
+                budgetMs -
+                overallStopwatch.ElapsedMilliseconds;
+
             if (remaining < MinAttemptBudgetMs)
                 break;
 
-            int cageBudget = (int)Math.Min(
-                CageBudgetMs,
-                Math.Max(
-                    MinAttemptBudgetMs,
-                    remaining - HumanBudgetMs - MinAttemptBudgetMs));
+            int cageBudget =
+                (int)Math.Min(
+                    CageBudgetMs,
+                    Math.Max(
+                        MinAttemptBudgetMs,
+                        remaining -
+                        HumanBudgetMs -
+                        MinAttemptBudgetMs));
 
-            List<Cage> cages;
-            try
+            List<Cage>? cages;
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            cages =
+                _cageGenerator.GenerateCages(
+                    _solution,
+                    difficulty,
+                    cageBudget,
+                    cancellationToken);
+
+            if (cages is null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                cages = _cageGenerator.GenerateCages(solution, difficulty, cageBudget, cancellationToken);
-            }
-            catch (InvalidOperationException ex)
-            {
-                System.Diagnostics.Debug.WriteLine("[KillerSudokuGenerator] InvalidOperationException:");
-                System.Diagnostics.Debug.WriteLine(ex.ToString());
-
-                attemptsSinceNewSolution++;
-                totalAttempts++;
+                _attemptsSinceNewSolution++;
+                _totalAttempts++;
                 continue;
             }
 
-            attemptsSinceNewSolution++;
-            totalAttempts++;
+            _attemptsSinceNewSolution++;
+            _totalAttempts++;
 
-            if (!IsCageStructureAcceptable(cages, difficulty))
+            remaining =
+                budgetMs -
+                overallStopwatch.ElapsedMilliseconds;
+
+            if (remaining < MinAttemptBudgetMs)
+                break;
+
+            int humanBudget =
+                (int)Math.Min(
+                    HumanBudgetMs,
+                    remaining);
+
+            var humanSolver =
+                new KillerHumanSolver(cages);
+
+            var humanResult =
+                humanSolver.Solve(
+                    new Board(),
+                    timeBudgetMs: humanBudget,
+                    targetDifficulty: difficulty,
+                    cancellationToken: cancellationToken);
+
+            if (humanResult.EarlyRejected)
             {
                 if (SolverDiagnostics.VerboseLogging)
                 {
                     Debug.WriteLine(
-                        $"[StructureReject] Difficulty={difficulty}, " +
-                        $"Cages={cages.Count}, " +
-                        $"Singles={cages.Count(c => c.Cells.Count == 1)}");
+                        $"[EarlyReject] " +
+                        $"Difficulty={difficulty}, " +
+                        $"MaxLevel={humanResult.MaxLevelUsed}, " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"Elapsed={overallStopwatch.ElapsedMilliseconds}ms");
                 }
 
                 continue;
             }
 
-            remaining = _overallBudgetMs - overallStopwatch.ElapsedMilliseconds;
-
-            if (remaining < MinAttemptBudgetMs)
-                break;
-
-            int humanBudget = (int)Math.Min(HumanBudgetMs, remaining);
-
-            var humanSolver = new KillerHumanSolver(cages);
-
-            var humanResult = humanSolver.Solve(
-                new Board(),
-                timeBudgetMs: humanBudget,
-                targetDifficulty: difficulty);
-
-            if (humanResult.EarlyRejected)
-            {
-                Debug.WriteLine(
-                    $"[EarlyReject] Difficulty={difficulty}, " +
-                    $"MaxLevel={humanResult.MaxLevelUsed}");
-
-                continue;
-            }
-
-            var difficultyResult = _difficultyScorer.Evaluate(humanResult);
+            var difficultyResult =
+                _difficultyScorer.Evaluate(humanResult);
 
             if (SolverDiagnostics.VerboseLogging)
             {
-                System.Diagnostics.Debug.WriteLine(
+                Debug.WriteLine(
                     $"[DifficultyCheck] " +
                     $"Requested={difficulty}, " +
                     $"Actual={difficultyResult.Label}, " +
@@ -153,70 +182,73 @@ public class KillerSudokuGenerator
             if (difficultyResult.Label != difficulty)
                 continue;
 
-            remaining = _overallBudgetMs - overallStopwatch.ElapsedMilliseconds;
+            remaining =
+                budgetMs -
+                overallStopwatch.ElapsedMilliseconds;
 
             if (remaining < MinAttemptBudgetMs)
                 break;
 
-            var killerSolver = new KillerBacktrackingSolver(cages);
+            var killerSolver =
+                new KillerBacktrackingSolver(
+                    cages,
+                    cancellationToken);
 
-            int solutionCount = killerSolver.CountSolutions(
-                new Board(),
-                limit: 2,
-                timeBudgetMs: (int)remaining);
+            int solutionCount =
+                killerSolver.CountSolutions(
+                    new Board(),
+                    limit: 2,
+                    timeBudgetMs: (int)remaining,
+                    cancellationToken: cancellationToken);
 
             if (solutionCount != 1)
+            {
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    Debug.WriteLine(
+                        $"[UniquenessReject] " +
+                        $"Result={solutionCount}, " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"Remaining={remaining}ms");
+                }
+
                 continue;
+            }
 
             if (SolverDiagnostics.VerboseLogging)
             {
-                System.Diagnostics.Debug.WriteLine(
+                Debug.WriteLine(
                     $"[成功] " +
                     $"経過{overallStopwatch.ElapsedMilliseconds}ms, " +
-                    $"試行{totalAttempts}回, " +
-                    $"完成盤面の作り直し{solutionRegenerations}回");
+                    $"試行{_totalAttempts}回, " +
+                    $"完成盤面の作り直し{_solutionRegenerations}回");
             }
 
-            return (solution, cages);
+            return (_solution, cages);
         }
 
-        throw new InvalidOperationException(
-            $"キラーナンプレの生成に失敗しました。実際の経過時間: {overallStopwatch.ElapsedMilliseconds}ms " +
-            $"(予算{_overallBudgetMs}ms), " +
-            $"試行回数: {totalAttempts}回, 完成盤面の作り直し回数: {solutionRegenerations}回");
+        return null;
     }
 
-    private static bool IsCageStructureAcceptable(
-    List<Cage> cages,
-    Difficulty difficulty)
+    /// <summary>完成盤面（正解）とケージ分割の両方を返す。</summary>
+    public (Board Solution, List<Cage> Cages) Generate(
+        Difficulty difficulty,
+        int budgetMs,
+        CancellationToken cancellationToken = default)
     {
-        int singles =
-            cages.Count(c => c.Cells.Count == 1);
+        var result =
+            TryGenerate(
+                difficulty,
+                budgetMs,
+                cancellationToken);
 
-        int nonSingles =
-            cages.Count(c => c.Cells.Count >= 2);
+        if (result is { } success)
+            return success;
 
-        return difficulty switch
-        {
-            Difficulty.Easy =>
-                singles <= 20,
-
-            Difficulty.Normal =>
-                singles <= 14,
-
-            Difficulty.Hard =>
-                singles <= 7 &&
-                nonSingles >= 18,
-
-            Difficulty.Expert =>
-                singles <= 5 &&
-                nonSingles >= 20,
-
-            Difficulty.Master =>
-                singles <= 3 &&
-                nonSingles >= 22,
-
-            _ => true
-        };
+        throw new InvalidOperationException(
+            $"キラーナンプレの生成に失敗しました。実際の経過時間: " +
+            $"{budgetMs}ms (予算{budgetMs}ms), " +
+            $"試行回数: {_totalAttempts}回, " +
+            $"完成盤面の作り直し回数: {_solutionRegenerations}回");
     }
 }

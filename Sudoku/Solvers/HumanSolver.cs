@@ -15,14 +15,21 @@ namespace Sudoku.Solvers;
 public class HumanSolver
 {
     private readonly List<ISolvingTechnique> _techniques;
-    private readonly Func<Board, bool> _fallbackSolve;
+    private readonly Func<Board, CancellationToken, bool> _fallbackSolve;
 
     /// <summary> 通常モード向けの標準構成 </summary>
-    public HumanSolver() : this(CreateClassicTechniques(), board => new BacktrackingSolver().TrySolve(board))
+    public HumanSolver()
+        : this(
+            CreateClassicTechniques(),
+            (board, cancellationToken) =>
+                new BacktrackingSolver()
+                    .TrySolve(board, cancellationToken))
     {
     }
     /// <summary> キラーモードなど、テクニック一覧とフォールバック処理を差し替えたいサブクラス向け </summary>
-    protected HumanSolver(List<ISolvingTechnique> techniques, Func<Board, bool> fallbackSolve)
+    protected HumanSolver(
+        List<ISolvingTechnique> techniques,
+        Func<Board, CancellationToken, bool> fallbackSolve)
     {
         _techniques = techniques;
         _fallbackSolve = fallbackSolve;
@@ -177,7 +184,9 @@ public class HumanSolver
                     CountRemainingCells(workingBoard);
 
                 bool solvedByFallback =
-                    _fallbackSolve(workingBoard);
+                    _fallbackSolve(
+                        workingBoard,
+                        cancellationToken);
 
                 return new HumanSolveResult(
                     Solved: solvedByFallback,
