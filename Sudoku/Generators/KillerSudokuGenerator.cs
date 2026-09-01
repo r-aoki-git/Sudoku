@@ -25,10 +25,11 @@ public class KillerSudokuGenerator
     private const int HumanBudgetMs = 400;
 
     // 唯一解検証（バックトラッキング）に使う予算。
-    // 難易度判定より先に実行し、複数解になる無駄なケージ構成に対して
-    // コストの高い人間解法テクニック群を走らせないようにする。
-    // 制約伝播による早期終了（KillerBacktrackingSolver.minFilledAfterPropagation）が
-    // あるため、多くの場合はこの予算を使い切る前に判定が完了する。
+    // 難易度判定より先に実行し、複数解になるケージ構成を
+    // 人間解法の前に除外する。
+    //
+    // 生成済みの完成盤面を既知解として渡し、
+    // 「既知解とは異なる別解」の有無だけを探索する。
     private const int UniquenessBudgetMs = 1200;
 
     private readonly Random _random;
@@ -73,6 +74,9 @@ public class KillerSudokuGenerator
 
         while (overallStopwatch.ElapsedMilliseconds < budgetMs)
         {
+            var attemptStopwatch =
+                Stopwatch.StartNew();
+
             cancellationToken.ThrowIfCancellationRequested();
 
             if (_solution is null ||
@@ -114,6 +118,9 @@ public class KillerSudokuGenerator
 
             cancellationToken.ThrowIfCancellationRequested();
 
+            var cageStopwatch =
+                Stopwatch.StartNew();
+
             cages =
                 _cageGenerator.GenerateCages(
                     _solution,
@@ -121,10 +128,24 @@ public class KillerSudokuGenerator
                     cageBudget,
                     cancellationToken);
 
+            cageStopwatch.Stop();
+
             if (cages is null)
             {
+                attemptStopwatch.Stop();
+
                 _attemptsSinceNewSolution++;
                 _totalAttempts++;
+
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    Debug.WriteLine(
+                        $"[CageReject] " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Cage={cageStopwatch.ElapsedMilliseconds}ms");
+                }
+
                 continue;
             }
 
@@ -133,13 +154,17 @@ public class KillerSudokuGenerator
 
             // ---------------------------------------------------------
             // ① 先に唯一解を検証する。
-            // 複数解になるケージ構成はここで破棄し、
-            // コストの高い人間解法の判定（②）を無駄に行わないようにする。
+            // _solutionは既に生成済みなので、
+            // 「_solutionとは異なる別解」が存在するかだけを探索する。
             // ---------------------------------------------------------
             var killerSolver =
                 new KillerBacktrackingSolver(
                     cages,
                     cancellationToken);
+
+            if (_solution is null)
+                throw new InvalidOperationException(
+                    "一意解検証に必要な完成盤面が存在しません。");
 
             long uniquenessBudget =
                 Math.Min(
@@ -152,35 +177,33 @@ public class KillerSudokuGenerator
             if (uniquenessBudget < MinAttemptBudgetMs)
                 break;
 
-            int solutionCount =
-                killerSolver.CountSolutions(
+
+            var uniquenessStopwatch =
+                Stopwatch.StartNew();
+
+            int uniquenessResult =
+                killerSolver.CheckUniqueAgainstKnownSolution(
                     new Board(),
-                    limit: 2,
+                    _solution,
                     timeBudgetMs: (int)uniquenessBudget,
                     cancellationToken: cancellationToken);
 
-            if (solutionCount != 1)
+            uniquenessStopwatch.Stop();
+
+
+            if (uniquenessResult != 1)
             {
+                attemptStopwatch.Stop();
+
                 if (SolverDiagnostics.VerboseLogging)
                 {
                     Debug.WriteLine(
                         $"[UniquenessReject] " +
-                        $"Result={solutionCount}, " +
+                        $"Result={uniquenessResult}, " +
                         $"Attempts={_totalAttempts}, " +
-                        $"Budget={uniquenessBudget}ms");
-                }
-
-                continue;
-            }
-
-            if (solutionCount != 1)
-            {
-                if (SolverDiagnostics.VerboseLogging)
-                {
-                    Debug.WriteLine(
-                        $"[UniquenessReject] " +
-                        $"Result={solutionCount}, " +
-                        $"Attempts={_totalAttempts}, " +
+                        $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
                         $"Budget={uniquenessBudget}ms");
                 }
 
@@ -202,6 +225,9 @@ public class KillerSudokuGenerator
                     HumanBudgetMs,
                     remaining);
 
+            var humanStopwatch =
+                Stopwatch.StartNew();
+
             var humanSolver =
                 new KillerHumanSolver(cages);
 
@@ -212,8 +238,12 @@ public class KillerSudokuGenerator
                     targetDifficulty: difficulty,
                     cancellationToken: cancellationToken);
 
+            humanStopwatch.Stop();
+
             if (humanResult.EarlyRejected)
             {
+                attemptStopwatch.Stop();
+
                 if (SolverDiagnostics.VerboseLogging)
                 {
                     Debug.WriteLine(
@@ -221,7 +251,10 @@ public class KillerSudokuGenerator
                         $"Difficulty={difficulty}, " +
                         $"MaxLevel={humanResult.MaxLevelUsed}, " +
                         $"Attempts={_totalAttempts}, " +
-                        $"Elapsed={overallStopwatch.ElapsedMilliseconds}ms");
+                        $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Human={humanStopwatch.ElapsedMilliseconds}ms");
                 }
 
                 continue;
@@ -229,6 +262,25 @@ public class KillerSudokuGenerator
 
             var difficultyResult =
                 _difficultyScorer.Evaluate(humanResult);
+
+            attemptStopwatch.Stop();
+
+            if (SolverDiagnostics.VerboseLogging)
+            {
+                Debug.WriteLine(
+                    $"[AttemptTiming] " +
+                    $"Attempt={_totalAttempts}, " +
+                    $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                    $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
+                    $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
+                    $"Human={humanStopwatch.ElapsedMilliseconds}ms, " +
+                    $"UniqueResult={uniquenessResult}, " +
+                    $"Solved={humanResult.Solved}, " +
+                    $"Fallback={humanResult.RequiredFallback}, " +
+                    $"Remaining={humanResult.RemainingCells}, " +
+                    $"Actual={difficultyResult.Label}, " +
+                    $"Score={difficultyResult.Score}");
+            }
 
             if (SolverDiagnostics.VerboseLogging)
             {
@@ -261,6 +313,7 @@ public class KillerSudokuGenerator
                 Debug.WriteLine(
                     $"[成功] " +
                     $"経過{overallStopwatch.ElapsedMilliseconds}ms, " +
+                    $"今回試行={attemptStopwatch.ElapsedMilliseconds}ms, " +
                     $"試行{_totalAttempts}回, " +
                     $"完成盤面の作り直し{_solutionRegenerations}回");
             }

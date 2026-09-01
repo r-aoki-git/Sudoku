@@ -137,97 +137,81 @@ public static class ParallelKillerSudokuGenerator
         var pending =
             allTasks.Cast<Task>().ToArray();
 
+        while (pending.Length > 0)
+        {
+            int index =
+                Task.WaitAny(
+                    pending,
+                    100);
+
+            if (index < 0)
+            {
+                if (cts.IsCancellationRequested)
+                    break;
+
+                continue;
+            }
+
+            var completed =
+                (Task<(Board Solution, List<Cage> Cages)?>)
+                    pending[index];
+
+            if (completed.IsCompletedSuccessfully &&
+                completed.Result is { } result)
+            {
+                // ---------------------------------------------------------
+                // 勝者確定。
+                // ---------------------------------------------------------
+                cts.Cancel();
+
+                Debug.WriteLine(
+                    $"[ParallelWinner] " +
+                    $"RoundElapsed={overallStopwatch.ElapsedMilliseconds}ms");
+
+                // ---------------------------------------------------------
+                // 全Workerが完全終了するまで待つ。
+                //
+                // CancellationTokenSourceをDisposeする前に、
+                // このラウンドで生成した全Workerを確実に終了させる。
+                // ---------------------------------------------------------
+                try
+                {
+                    Task.WaitAll(allTasks);
+                }
+                catch (AggregateException)
+                {
+                    // Worker側で処理済み。
+                }
+
+                return result;
+            }
+
+            pending =
+                pending
+                    .Where(task =>
+                        !ReferenceEquals(task, completed))
+                    .ToArray();
+        }
+
+        // -------------------------------------------------------------
+        // タイムアウト。
+        // -------------------------------------------------------------
+        cts.Cancel();
+
         try
         {
-            while (pending.Length > 0)
-            {
-                int index =
-                    Task.WaitAny(
-                        pending,
-                        100);
-
-                if (index < 0)
-                {
-                    if (cts.IsCancellationRequested)
-                        break;
-
-                    continue;
-                }
-
-                var completed =
-                    (Task<(Board Solution, List<Cage> Cages)?>)
-                        pending[index];
-
-                if (completed.IsCompletedSuccessfully &&
-                    completed.Result is { } result)
-                {
-                    // 勝者確定。
-                    cts.Cancel();
-
-                    Debug.WriteLine(
-                        $"[ParallelWinner] " +
-                        $"RoundElapsed={overallStopwatch.ElapsedMilliseconds}ms");
-
-                    // -----------------------------------------------------
-                    // 重要：
-                    // 勝者以外のWorkerが完全終了してから返す。
-                    //
-                    // ただし無制限に待たず、協調キャンセルが効かない
-                    // Workerが存在する場合でも最大2秒で切り上げる。
-                    // -----------------------------------------------------
-                    try
-                    {
-                        Task.WaitAll(
-                            allTasks,
-                            millisecondsTimeout: 2000);
-                    }
-                    catch (AggregateException)
-                    {
-                        // Worker側で処理済み。
-                    }
-
-                    return result;
-                }
-
-                pending =
-                    pending
-                        .Where(task =>
-                            !ReferenceEquals(task, completed))
-                        .ToArray();
-            }
-
-            cts.Cancel();
-
-            try
-            {
-                Task.WaitAll(
-                    allTasks,
-                    millisecondsTimeout: 2000);
-            }
-            catch (AggregateException)
-            {
-                // Worker側で処理済み。
-            }
-
-            throw new InvalidOperationException(
-                $"並列 {workers} ワーカーとも " +
-                $"{overallTimeoutMs}ms 以内に成功しませんでした。");
+            // CancellationTokenSourceをDisposeする前に
+            // 全Workerを確実に終了させる。
+            Task.WaitAll(allTasks);
         }
-        finally
+        catch (AggregateException)
         {
-            cts.Cancel();
-
-            try
-            {
-                Task.WaitAll(
-                    allTasks,
-                    millisecondsTimeout: 2000);
-            }
-            catch (AggregateException)
-            {
-                // Worker側で処理済み。
-            }
+            // Worker側で処理済み。
         }
+
+        throw new InvalidOperationException(
+            $"並列 {workers} ワーカーとも " +
+            $"{overallTimeoutMs}ms 以内に成功しませんでした。");
     }
 
     private static (Board Solution, List<Cage> Cages)? RunWorker(

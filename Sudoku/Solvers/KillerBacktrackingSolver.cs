@@ -1,7 +1,6 @@
 ﻿using Sudoku.Models;
 using System.Collections.Concurrent;
-using System.Threading;
-using System.Windows.Controls;
+using System.Numerics;
 
 namespace Sudoku.Solvers;
 
@@ -24,9 +23,23 @@ public class KillerBacktrackingSolver
 
     private int[,] _grid = new int[Board.Size, Board.Size];
     private int[,] _candidates = new int[Board.Size, Board.Size];
+
+    private readonly int[] _rowUsed =
+    new int[Board.Size];
+
+    private readonly int[] _colUsed =
+        new int[Board.Size];
+
+    private readonly int[] _boxUsed =
+        new int[Board.Size];
+
     private System.Diagnostics.Stopwatch? _stopwatch;
     private int _timeBudgetMs;
     private bool _aborted;
+
+    // 一意解検証時に使用する既知の完成盤面。
+    // 「この盤面とは異なる解」が存在するかを探索する。
+    private int[,]? _knownSolution;
 
     private readonly struct GridChange
     {
@@ -171,9 +184,13 @@ public class KillerBacktrackingSolver
 
     /// <summary>
     /// 解の個数をlimit件までカウントする。
-    /// 戻り値: 実際の解の個数（0〜limit）／ -1=時間切れ／ -2=制約伝播だけでは全然埋まらず、
-    /// このケージ配置は見込みが薄いと判断して深い探索を行わずに見切った場合。
-    /// -1・-2どちらも、呼び出し側は「不合格・リトライ」として扱えばよい。
+    ///
+    /// 戻り値:
+    ///   0〜limit = 実際に確認できた解の個数
+    ///   -1 = 時間切れまたはキャンセル
+    ///
+    /// 制約伝播後の未確定セル数を理由に
+    /// 探索を打ち切ることはしない。
     /// </summary>
     public int CountSolutions(
         Board board,
@@ -210,8 +227,328 @@ public class KillerBacktrackingSolver
             : count;
     }
 
+    /// <summary>
+    /// 既知の完成盤面以外に解が存在するかを探索する。
+    ///
+    /// 戻り値:
+    ///   1  = 既知の完成盤面が唯一解
+    ///   2  = 既知の完成盤面とは異なる別解を発見
+    ///  -1  = 時間切れまたはキャンセル
+    ///   0  = 制約上成立する解が存在しない
+    ///
+    /// KillerSudokuGeneratorでは、元の完成盤面が必ず1つの既知解として
+    ///存在するため、通常は1または2を返す。
+    /// </summary>
+    public int CheckUniqueAgainstKnownSolution(
+        Board board,
+        Board knownSolution,
+        int timeBudgetMs,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(board);
+        ArgumentNullException.ThrowIfNull(knownSolution);
+
+        if (timeBudgetMs <= 0)
+            throw new ArgumentOutOfRangeException(nameof(timeBudgetMs));
+
+        _cancellationToken = cancellationToken;
+
+        LoadFromBoard(board);
+
+        _stopwatch =
+            System.Diagnostics.Stopwatch.StartNew();
+
+        _timeBudgetMs =
+            timeBudgetMs;
+
+        _aborted = false;
+
+        _knownSolution =
+            new int[Board.Size, Board.Size];
+
+        // ------------------------------------------------------------
+        // 既知解を読み込む。
+        // ------------------------------------------------------------
+        for (int r = 0; r < Board.Size; r++)
+        {
+            for (int c = 0; c < Board.Size; c++)
+            {
+                var cell =
+                    knownSolution.GetCell(r, c);
+
+                if (!cell.HasValue)
+                {
+                    _knownSolution = null;
+
+                    throw new InvalidOperationException(
+                        "一意解検証に渡された完成盤面に空セルがあります。");
+                }
+
+                int value =
+                    cell.Value!.Value;
+
+                if (value < 1 || value > Board.Size)
+                {
+                    _knownSolution = null;
+
+                    throw new InvalidOperationException(
+                        $"一意解検証に渡された完成盤面の値が不正です: {value}");
+                }
+
+                _knownSolution[r, c] =
+                    value;
+            }
+        }
+
+        _cancellationToken.ThrowIfCancellationRequested();
+
+        // ------------------------------------------------------------
+        // 制約伝播。
+        // ここで状態を一度だけ正規化する。
+        // ------------------------------------------------------------
+        if (!Propagate())
+        {
+            int result =
+                _aborted
+                    ? -1
+                    : 0;
+
+            _knownSolution = null;
+
+            return result;
+        }
+
+        // ------------------------------------------------------------
+        // 制約伝播後に既知解と異なる状態になっている場合。
+        // そこから1解見つかれば、それが別解になる。
+        // ------------------------------------------------------------
+        if (IsDifferentFromKnownSolution())
+        {
+            bool solved =
+                SolveOne();
+
+            if (_aborted)
+            {
+                _knownSolution = null;
+                return -1;
+            }
+
+            _knownSolution = null;
+
+            return solved ? 2 : 1;
+        }
+
+        // ------------------------------------------------------------
+        // 完成しており、しかも既知解と一致している。
+        // 別解は存在しない。
+        // ------------------------------------------------------------
+        if (FindMrvCell() is null)
+        {
+            _knownSolution = null;
+            return 1;
+        }
+
+        // ------------------------------------------------------------
+        // ここでは既にPropagate済み。
+        // SearchForAlternativeSolution() は
+        // 探索開始時にもう一度Propagateしない。
+        // ------------------------------------------------------------
+        bool alternativeFound =
+            SearchForAlternativeSolution(propagated: true);
+
+        if (_aborted)
+        {
+            _knownSolution = null;
+            return -1;
+        }
+
+        _knownSolution = null;
+
+        return alternativeFound ? 2 : 1;
+    }
+
+    /// <summary>
+    /// 現在の盤面から、既知解とは異なる解を探す。
+    ///
+    /// 現在の状態が既知解と矛盾した場合は、
+    /// そこから通常のSolveOne()で完成解を1つ探す。
+    ///
+    /// まだ既知解と一致している場合は、
+    /// 分岐時に既知解と異なる数字を優先的に探索する。
+    /// </summary>
+    private bool SearchForAlternativeSolution(
+        bool propagated = false)
+    {
+        if (TimeIsUp())
+        {
+            _aborted = true;
+            return false;
+        }
+
+        if (_knownSolution is null)
+            throw new InvalidOperationException(
+                "既知解が設定されていません。");
+
+        var checkpoint =
+            CreateCheckpoint();
+
+        // 親から既に制約伝播済みの場合は、
+        // 同じPropagateを二重実行しない。
+        if (!propagated)
+        {
+            if (!Propagate() || _aborted)
+            {
+                Restore(checkpoint);
+                return false;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 現在の状態ですでに既知解から分岐している場合、
+        // この状態から完成解を1つ見つければ、それが別解になる。
+        // ------------------------------------------------------------
+        if (IsDifferentFromKnownSolution())
+        {
+            bool solved =
+                SolveOne();
+
+            if (solved)
+                return true;
+
+            Restore(checkpoint);
+            return false;
+        }
+
+        var target =
+            FindMrvCell();
+
+        // 完成しており、既知解と一致している。
+        // これは「既知解そのもの」なので別解ではない。
+        if (target is null)
+        {
+            Restore(checkpoint);
+            return false;
+        }
+
+        var (row, col, mask) =
+            target.Value;
+
+        int knownDigit =
+            _knownSolution[row, col];
+
+        int knownBit =
+            1 << (knownDigit - 1);
+
+        // ------------------------------------------------------------
+        // まず「既知解とは異なる数字」を試す。
+        //
+        // 別解が存在するなら、こちら側で即座に見つかる可能性が高い。
+        // ------------------------------------------------------------
+        foreach (int digit in IterateDigits(mask))
+        {
+            if (_aborted)
+                break;
+
+            if (digit == knownDigit)
+                continue;
+
+            var branchCheckpoint =
+                CreateCheckpoint();
+
+            SetGridValue(
+                row,
+                col,
+                digit);
+
+            if (SolveOne())
+                return true;
+
+            Restore(branchCheckpoint);
+
+            if (TimeIsUp())
+            {
+                _aborted = true;
+                break;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 異なる数字の分岐ですべて解が存在しなかった場合のみ、
+        // 既知解と同じ数字の分岐を進める。
+        //
+        // この先のどこかで別のセルが既知解と異なる可能性があるため、
+        // 再帰的に調べる。
+        // ------------------------------------------------------------
+        if (!_aborted &&
+            (mask & knownBit) != 0)
+        {
+            var knownBranchCheckpoint =
+                CreateCheckpoint();
+
+            SetGridValue(
+                row,
+                col,
+                knownDigit);
+
+            if (SearchForAlternativeSolution())
+                return true;
+
+            Restore(knownBranchCheckpoint);
+        }
+
+        Restore(checkpoint);
+
+        return false;
+    }
+
+    /// <summary>
+    /// 現在の状態が、既知の完成盤面からすでに分岐しているかを判定する。
+    ///
+    /// 次のいずれかに該当した場合、既知解とは異なる:
+    ///   1. 確定値が既知解と異なる
+    ///   2. 未確定セルの候補から既知解の数字が消えている
+    ///
+    /// 2の場合は、この状態から既知解へ戻ることが不可能なので、
+    /// 完成できれば必ず別解になる。
+    /// </summary>
+    private bool IsDifferentFromKnownSolution()
+    {
+        if (_knownSolution is null)
+            throw new InvalidOperationException(
+                "既知解が設定されていません。");
+
+        for (int r = 0; r < Board.Size; r++)
+        {
+            for (int c = 0; c < Board.Size; c++)
+            {
+                int current =
+                    _grid[r, c];
+
+                int known =
+                    _knownSolution[r, c];
+
+                if (current != 0)
+                {
+                    if (current != known)
+                        return true;
+
+                    continue;
+                }
+
+                int knownBit =
+                    1 << (known - 1);
+
+                if ((_candidates[r, c] & knownBit) == 0)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
     private void LoadFromBoard(Board board)
     {
+        _knownSolution = null;
         _grid = new int[Board.Size, Board.Size];
 
         for (int r = 0; r < Board.Size; r++)
@@ -425,31 +762,79 @@ public class KillerBacktrackingSolver
     /// <summary>通常のナンプレ制約（行・列・ブロック）だけから、各空きマスの候補を計算する。</summary>
     private void RecomputeBasicCandidates()
     {
+        Array.Clear(
+            _rowUsed,
+            0,
+            _rowUsed.Length);
+
+        Array.Clear(
+            _colUsed,
+            0,
+            _colUsed.Length);
+
+        Array.Clear(
+            _boxUsed,
+            0,
+            _boxUsed.Length);
+
+        // ------------------------------------------------------------
+        // 行・列・ブロックの使用数字を一度だけ作る。
+        // ------------------------------------------------------------
+        for (int r = 0; r < Board.Size; r++)
+        {
+            for (int c = 0; c < Board.Size; c++)
+            {
+                int value =
+                    _grid[r, c];
+
+                if (value == 0)
+                    continue;
+
+                int bit =
+                    1 << (value - 1);
+
+                _rowUsed[r] |= bit;
+                _colUsed[c] |= bit;
+
+                int box =
+                    (r / Board.BoxSize) * Board.BoxSize +
+                    (c / Board.BoxSize);
+
+                _boxUsed[box] |= bit;
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 各セルの候補を、
+        // 行・列・ブロックの3マスクから一発で求める。
+        // ------------------------------------------------------------
         for (int r = 0; r < Board.Size; r++)
         {
             for (int c = 0; c < Board.Size; c++)
             {
                 if (_grid[r, c] != 0)
                 {
-                    SetCandidates(r, c, 0);
+                    SetCandidates(
+                        r,
+                        c,
+                        0);
+
                     continue;
                 }
 
-                int used = 0;
-                for (int i = 0; i < Board.Size; i++)
-                {
-                    if (_grid[r, i] != 0)
-                        used |= 1 << (_grid[r, i] - 1);
-                    if (_grid[i, c] != 0)
-                        used |= 1 << (_grid[i, c] - 1);
-                }
+                int box =
+                    (r / Board.BoxSize) * Board.BoxSize +
+                    (c / Board.BoxSize);
 
-                int boxRow = (r / Board.BoxSize) * Board.BoxSize;
-                int boxCol = (c / Board.BoxSize) * Board.BoxSize;
-                for (int rr = boxRow; rr < boxRow + Board.BoxSize; rr++)
-                    for (int cc = boxCol; cc < boxCol + Board.BoxSize; cc++)
-                        if (_grid[rr, cc] != 0) used |= 1 << (_grid[rr, cc] - 1);
-                SetCandidates(r, c, FullMask & ~used);
+                int used =
+                    _rowUsed[r] |
+                    _colUsed[c] |
+                    _boxUsed[box];
+
+                SetCandidates(
+                    r,
+                    c,
+                    FullMask & ~used);
             }
         }
     }
@@ -568,125 +953,301 @@ public class KillerBacktrackingSolver
         return true;
     }
 
-    private int[] GetComboAllowedMasks(List<(int Row, int Col)> cells, int remainingMask)
+    private int[] GetComboAllowedMasks(
+        List<(int Row, int Col)> cells,
+        int remainingMask)
     {
-        int[] allowed = new int[cells.Count];
+        int cellCount = cells.Count;
 
-        for (int i = 0; i < cells.Count; i++)
+        int[] allowed =
+            new int[cellCount];
+
+        int allCellMask =
+            (1 << cellCount) - 1;
+
+        for (int i = 0; i < cellCount; i++)
         {
-            var cell = cells[i];
+            var cell =
+                cells[i];
 
-            int possible = _candidates[cell.Row, cell.Col] & remainingMask;
+            int possible =
+                _candidates[cell.Row, cell.Col] &
+                remainingMask;
 
-            foreach (int digit in IterateDigits(possible))
+            int cellBit =
+                1 << i;
+
+            while (possible != 0)
             {
-                int bit = 1 << (digit - 1);
+                int digitBit =
+                    possible & -possible;
 
-                // このセルにこの数字を置いた状態で、残りの数字を残りのセルへ割り当てられるか確認
-                var remainingCells = new List<(int Row, int Col)>(cells);
+                possible &=
+                    possible - 1;
 
-                remainingCells.RemoveAt(i);
+                int nextCellMask =
+                    allCellMask & ~cellBit;
 
-                int remainingDigits = remainingMask & ~bit;
+                int nextDigitMask =
+                    remainingMask & ~digitBit;
 
-                if (CanCompleteAssignment(remainingCells, remainingDigits))
-                    allowed[i] |= bit;
+                if (CanCompleteAssignment(
+                    cells,
+                    nextCellMask,
+                    nextDigitMask))
+                {
+                    allowed[i] |= digitBit;
+                }
             }
         }
 
         return allowed;
     }
 
-    private bool CanCompleteAssignment(List<(int Row, int Col)> cells, int remainingMask)
+    private bool CanCompleteAssignment(
+        List<(int Row, int Col)> cells,
+        int remainingCellMask,
+        int remainingDigitMask)
     {
-        // 全セルに割り当て終わった
-        if (cells.Count == 0)
-            return remainingMask == 0;
+        if (remainingCellMask == 0)
+            return remainingDigitMask == 0;
 
-        // セル数と数字数が一致していない
-        if (PopCount(remainingMask) != cells.Count)
+        int cellCount =
+            BitOperations.PopCount(
+                (uint)remainingCellMask);
+
+        if (BitOperations.PopCount(
+                (uint)remainingDigitMask) != cellCount)
+        {
             return false;
+        }
 
         int bestIndex = -1;
-        int bestMask = 0;
+        int bestCandidates = 0;
         int bestCount = int.MaxValue;
 
-        // MRV: 残っているセルのうち、候補数が最も少ないセルを選ぶ
-        for (int i = 0; i < cells.Count; i++)
+        int cellMask =
+            remainingCellMask;
+
+        while (cellMask != 0)
         {
-            var cell = cells[i];
+            int cellBit =
+                cellMask & -cellMask;
 
-            int possible = _candidates[cell.Row, cell.Col] & remainingMask;
+            int index =
+                BitOperations.TrailingZeroCount(
+                    (uint)cellBit);
 
-            int count = PopCount(possible);
+            var cell =
+                cells[index];
 
-            if (count == 0)
+            int possible =
+                _candidates[cell.Row, cell.Col] &
+                remainingDigitMask;
+
+            if (possible == 0)
                 return false;
+
+            int count =
+                BitOperations.PopCount(
+                    (uint)possible);
 
             if (count < bestCount)
             {
-                bestCount = count;
-                bestIndex = i;
-                bestMask = possible;
+                bestCount =
+                    count;
+
+                bestIndex =
+                    index;
+
+                bestCandidates =
+                    possible;
 
                 if (count == 1)
                     break;
             }
+
+            cellMask &=
+                cellMask - 1;
         }
 
-        var selectedCell = cells[bestIndex];
+        int selectedCellBit =
+            1 << bestIndex;
 
-        var nextCells = new List<(int Row, int Col)>(cells);
+        int nextCellMask =
+            remainingCellMask &
+            ~selectedCellBit;
 
-        nextCells.RemoveAt(bestIndex);
+        int candidates =
+            bestCandidates;
 
-        foreach (int digit in IterateDigits(bestMask))
+        while (candidates != 0)
         {
-            int bit = 1 << (digit - 1);
+            int digitBit =
+                candidates & -candidates;
 
-            if (CanCompleteAssignment(nextCells, remainingMask & ~bit))
+            candidates &=
+                candidates - 1;
+
+            if (CanCompleteAssignment(
+                cells,
+                nextCellMask,
+                remainingDigitMask & ~digitBit))
+            {
                 return true;
+            }
         }
+
         return false;
     }
 
     private bool ApplyHiddenSingles()
     {
+        // ------------------------------------------------------------
+        // 行
+        // ------------------------------------------------------------
         for (int r = 0; r < Board.Size; r++)
         {
-            if (ApplyHiddenSingleToUnit(Enumerable.Range(0, Board.Size)
-                .Select(c => (r, c))))
+            for (int digit = 1; digit <= Board.Size; digit++)
             {
-                return true;
-            }
-        }
+                int bit =
+                    1 << (digit - 1);
 
-        for (int c = 0; c < Board.Size; c++)
-        {
-            if (ApplyHiddenSingleToUnit(
-                Enumerable.Range(0, Board.Size)
-                .Select(r => (r, c))))
-            {
-                return true;
-            }
-        }
+                int foundRow = -1;
+                int count = 0;
 
-        for (int boxRow = 0; boxRow < Board.Size; boxRow += Board.BoxSize)
-        {
-            for (int boxCol = 0; boxCol < Board.Size; boxCol += Board.BoxSize)
-            {
-                var cells = new List<(int Row, int Col)>();
-
-                for (int r = boxRow; r < boxRow + Board.BoxSize; r++)
+                for (int c = 0; c < Board.Size; c++)
                 {
-                    for (int c = boxCol; c < boxCol + Board.BoxSize; c++)
-                    {
-                        cells.Add((r, c));
-                    }
+                    if (_grid[r, c] != 0)
+                        continue;
+
+                    if ((_candidates[r, c] & bit) == 0)
+                        continue;
+
+                    count++;
+
+                    if (count == 1)
+                        foundRow = c;
+                    else
+                        break;
                 }
 
-                if (ApplyHiddenSingleToUnit(cells))
+                if (count == 1)
+                {
+                    SetGridValue(
+                        r,
+                        foundRow,
+                        digit);
+
                     return true;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
+        // 列
+        // ------------------------------------------------------------
+        for (int c = 0; c < Board.Size; c++)
+        {
+            for (int digit = 1; digit <= Board.Size; digit++)
+            {
+                int bit =
+                    1 << (digit - 1);
+
+                int foundRow = -1;
+                int count = 0;
+
+                for (int r = 0; r < Board.Size; r++)
+                {
+                    if (_grid[r, c] != 0)
+                        continue;
+
+                    if ((_candidates[r, c] & bit) == 0)
+                        continue;
+
+                    count++;
+
+                    if (count == 1)
+                        foundRow = r;
+                    else
+                        break;
+                }
+
+                if (count == 1)
+                {
+                    SetGridValue(
+                        foundRow,
+                        c,
+                        digit);
+
+                    return true;
+                }
+            }
+        }
+
+        // ------------------------------------------------------------
+        // ブロック
+        // ------------------------------------------------------------
+        for (int boxRow = 0;
+             boxRow < Board.Size;
+             boxRow += Board.BoxSize)
+        {
+            for (int boxCol = 0;
+                 boxCol < Board.Size;
+                 boxCol += Board.BoxSize)
+            {
+                for (int digit = 1;
+                     digit <= Board.Size;
+                     digit++)
+                {
+                    int bit =
+                        1 << (digit - 1);
+
+                    int foundRow = -1;
+                    int foundCol = -1;
+                    int count = 0;
+
+                    for (int r = boxRow;
+                         r < boxRow + Board.BoxSize;
+                         r++)
+                    {
+                        for (int c = boxCol;
+                             c < boxCol + Board.BoxSize;
+                             c++)
+                        {
+                            if (_grid[r, c] != 0)
+                                continue;
+
+                            if ((_candidates[r, c] & bit) == 0)
+                                continue;
+
+                            count++;
+
+                            if (count == 1)
+                            {
+                                foundRow = r;
+                                foundCol = c;
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+
+                        if (count >= 2)
+                            break;
+                    }
+
+                    if (count == 1)
+                    {
+                        SetGridValue(
+                            foundRow,
+                            foundCol,
+                            digit);
+
+                        return true;
+                    }
+                }
             }
         }
 
@@ -804,15 +1365,25 @@ public class KillerBacktrackingSolver
 
     private static int PopCount(int mask)
     {
-        int count = 0;
-        while (mask != 0) { count += mask & 1; mask >>= 1; }
-        return count;
+        return BitOperations.PopCount(
+            (uint)mask);
     }
 
     private static IEnumerable<int> IterateDigits(int mask)
     {
-        for (int digit = 1; digit <= 9; digit++)
-            if ((mask & (1 << (digit - 1))) != 0)
-                yield return digit;
+        while (mask != 0)
+        {
+            int bit =
+                mask & -mask;
+
+            int digit =
+                BitOperations.TrailingZeroCount(
+                    (uint)bit) + 1;
+
+            yield return digit;
+
+            mask &=
+                mask - 1;
+        }
     }
 }
