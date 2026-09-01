@@ -161,7 +161,6 @@ public class KillerSudokuGenerator
                     new Board(),
                     limit: 2,
                     timeBudgetMs: uniquenessBudget,
-                    minFilledAfterPropagation: GetMinFilledThreshold(difficulty),
                     cancellationToken: cancellationToken);
 
             if (solutionCount != 1)
@@ -261,24 +260,6 @@ public class KillerSudokuGenerator
 
         return null;
     }
-
-    /// <summary>
-    /// 唯一解検証（KillerBacktrackingSolver.CountSolutions）における、
-    /// 「制約伝播だけでこのマス数以上埋まらなければ見込み薄として打ち切る」閾値。
-    /// 難易度が高いケージ構成ほど制約伝播だけでは埋まりにくいため、
-    /// 一律45で固定すると本来唯一解であるHard/Expert/Master構成まで
-    /// 早期棄却してしまう。難易度に応じて閾値を下げ、精度（正しい難易度の
-    /// 構成を取りこぼさないこと）を優先する。
-    /// </summary>
-    private static int GetMinFilledThreshold(Difficulty difficulty) => difficulty switch
-    {
-        Difficulty.Easy => 50,
-        Difficulty.Normal => 45,
-        Difficulty.Hard => 35,
-        Difficulty.Expert => 25,
-        Difficulty.Master => 15,
-        _ => 45,
-    };
 
     /// <summary>完成盤面（正解）とケージ分割の両方を返す。</summary>
     public (Board Solution, List<Cage> Cages) Generate(

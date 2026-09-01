@@ -179,7 +179,6 @@ public class KillerBacktrackingSolver
         Board board,
         int limit = 2,
         int timeBudgetMs = 5000,
-        int minFilledAfterPropagation = 45,
         CancellationToken cancellationToken = default)
     {
         _cancellationToken = cancellationToken;
@@ -194,17 +193,21 @@ public class KillerBacktrackingSolver
         if (!Propagate())
             return _aborted ? -1 : 0; // 矛盾（そもそも成立しないケージ配置）
 
-        int filled = CountFilledCells();
-        if (filled == Board.Size * Board.Size)
-            return 1; // 制約伝播だけで完成=唯一解が確定
+        int filled =
+            CountFilledCells();
 
-        if (filled < minFilledAfterPropagation)
-            return -2;
+        if (filled == Board.Size * Board.Size)
+            return 1;
 
         int count = 0;
-        CountAll(limit, ref count);
 
-        return _aborted ? -1 : count;
+        CountAll(
+            limit,
+            ref count);
+
+        return _aborted
+            ? -1
+            : count;
     }
 
     private void LoadFromBoard(Board board)

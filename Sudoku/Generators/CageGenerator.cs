@@ -64,10 +64,10 @@ public sealed class CageGenerator
             [Difficulty.Hard] =
                 (
                     MaxSize: 5,
-                    MinAvg: 2.2,
-                    TargetAvg: 2.6,
-                    MaxAvg: 3.4,
-                    MaxSingles: 9,
+                    MinAvg: 2.4,
+                    TargetAvg: 2.8,
+                    MaxAvg: 3.2,
+                    MaxSingles: 7,
                     MaxSize5: 4
                 ),
 
@@ -224,7 +224,7 @@ public sealed class CageGenerator
         // そこで、目標に届くまで最大8パスする。
         // 144辺 × 8パスでも十分小さい。
         // ------------------------------------------------------------
-        const int MaxMergePasses = 8;
+        const int MaxMergePasses = 12;
 
         for (int pass = 0; pass < MaxMergePasses; pass++)
         {
@@ -355,7 +355,7 @@ public sealed class CageGenerator
         // そこで、目標ケージ数への到達可否とは無関係に、
         // 残っている単セルを maxSingles を満たすまで追加でマージする。
         // ------------------------------------------------------------
-        const int MaxSingleCleanupPasses = 8;
+        const int MaxSingleCleanupPasses = 16;
 
         for (int cleanupPass = 0; cleanupPass < MaxSingleCleanupPasses; cleanupPass++)
         {
@@ -375,13 +375,14 @@ public sealed class CageGenerator
                 if (rootA == rootB)
                     continue;
 
-                bool hasSingle = size[rootA] == 1 || size[rootB] == 1;
-                if (!hasSingle)
-                    continue;
+                bool aSingle =
+                    size[rootA] == 1;
+
+                bool bSingle =
+                    size[rootB] == 1;
 
                 int newSize =
-                    size[rootA] +
-                    size[rootB];
+                    size[rootA] + size[rootB];
 
                 if (newSize > maxSize)
                     continue;
@@ -389,21 +390,44 @@ public sealed class CageGenerator
                 if ((digitMask[rootA] & digitMask[rootB]) != 0)
                     continue;
 
-                if (newSize == 5)
+                // 単セルを含む結合を最優先する。
+                if (aSingle || bSingle)
                 {
-                    int currentSize5Count =
-                        CountCagesOfSize(
-                            parent,
-                            size,
-                            5);
+                    Union(
+                        parent,
+                        rank,
+                        size,
+                        digitMask,
+                        rootA,
+                        rootB);
 
-                    if (currentSize5Count >= maxSize5)
-                        continue;
+                    cageCount--;
+                    mergedThisPass = true;
+
+                    if (CountSingles(parent, size) <= maxSingles)
+                        break;
+
+                    continue;
                 }
 
-                Union(parent, rank, size, digitMask, rootA, rootB);
+                // 単セルを含まないケージ同士は、
+                // 小さいケージ同士のみ追加結合する。
+                if (newSize > 3)
+                    continue;
+
+                Union(
+                    parent,
+                    rank,
+                    size,
+                    digitMask,
+                    rootA,
+                    rootB);
+
                 cageCount--;
                 mergedThisPass = true;
+
+                if (CountSingles(parent, size) <= maxSingles)
+                    break;
 
                 if (CountSingles(parent, size) <= maxSingles)
                     break;
@@ -436,7 +460,7 @@ public sealed class CageGenerator
         int size5Count =
             cages.Count(c => c.Count == 5);
 
-        const double TargetTolerance = 0.5;
+        const double TargetTolerance = 0.3;
 
         if (Math.Abs(avgSize - targetAvg) > TargetTolerance)
             return null;
