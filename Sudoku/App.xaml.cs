@@ -50,7 +50,7 @@ namespace Sudoku
                                 requestedDifficulty,
                                 workerCount: 4,
                                 overallTimeoutMs: 10000,
-                                perAttemptBudgetMs: 2000,
+                                perAttemptBudgetMs: 2500,
                                 maxEscalations: 1);
 
                         stopwatch.Stop();

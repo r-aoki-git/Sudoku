@@ -22,14 +22,14 @@ public class KillerSudokuGenerator
     private const int CageBudgetMs = 100;
 
     // 難易度判定に使う予算
-    private const int HumanBudgetMs = 1500;
+    private const int HumanBudgetMs = 400;
 
     // 唯一解検証（バックトラッキング）に使う予算。
     // 難易度判定より先に実行し、複数解になる無駄なケージ構成に対して
     // コストの高い人間解法テクニック群を走らせないようにする。
     // 制約伝播による早期終了（KillerBacktrackingSolver.minFilledAfterPropagation）が
     // あるため、多くの場合はこの予算を使い切る前に判定が完了する。
-    private const int UniquenessBudgetMs = 1000;
+    private const int UniquenessBudgetMs = 1200;
 
     private readonly Random _random;
     private readonly BacktrackingSolver _solver;
@@ -136,32 +136,42 @@ public class KillerSudokuGenerator
             // 複数解になるケージ構成はここで破棄し、
             // コストの高い人間解法の判定（②）を無駄に行わないようにする。
             // ---------------------------------------------------------
-            remaining =
-                budgetMs -
-                overallStopwatch.ElapsedMilliseconds;
-
-            if (remaining < MinAttemptBudgetMs)
-                break;
-
-            int uniquenessBudget =
-                (int)Math.Min(
-                    UniquenessBudgetMs,
-                    remaining);
-
             var killerSolver =
                 new KillerBacktrackingSolver(
                     cages,
                     cancellationToken);
 
-            // 難易度が上がるほど、制約伝播だけでは埋まりにくい構造になりやすい。
-            // 閾値を下げすぎず、かつ高難易度側で不当に早期棄却しないよう
-            // 難易度に応じて可変にする。
+            long uniquenessBudget =
+                Math.Min(
+                    UniquenessBudgetMs,
+                    Math.Max(
+                        MinAttemptBudgetMs,
+                        budgetMs -
+                        overallStopwatch.ElapsedMilliseconds));
+
+            if (uniquenessBudget < MinAttemptBudgetMs)
+                break;
+
             int solutionCount =
                 killerSolver.CountSolutions(
                     new Board(),
                     limit: 2,
-                    timeBudgetMs: uniquenessBudget,
+                    timeBudgetMs: (int)uniquenessBudget,
                     cancellationToken: cancellationToken);
+
+            if (solutionCount != 1)
+            {
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    Debug.WriteLine(
+                        $"[UniquenessReject] " +
+                        $"Result={solutionCount}, " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"Budget={uniquenessBudget}ms");
+                }
+
+                continue;
+            }
 
             if (solutionCount != 1)
             {
