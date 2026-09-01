@@ -35,7 +35,10 @@ public static class ParallelKillerSudokuGenerator
     private const int DefaultMaxEscalations = 1;
     private const double EscalationMultiplier = 1.5;
 
-    private const int DefaultWorkerCount = 4;
+    // 実行環境のCPUコア数に応じて並列度を決定する。
+    // メインスレッド分を除いたコア数を基本とし、1〜8の範囲に収める。
+    private static readonly int DefaultWorkerCount =
+        Math.Clamp(Environment.ProcessorCount - 1, 1, 8);
 
     public static (Board Solution, List<Cage> Cages) Generate(
         Difficulty difficulty,

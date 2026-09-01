@@ -1,4 +1,5 @@
 ﻿using Sudoku.Models;
+using static Sudoku.Solvers.CageCombinatorics;
 
 namespace Sudoku.Solvers.Techniques;
 
@@ -13,6 +14,7 @@ namespace Sudoku.Solvers.Techniques;
 public class KillerPairTripleTechnique : ISolvingTechnique
 {
     private readonly List<Cage> _cages;
+    private readonly CageAnalysisCache _cache = new();
 
     public KillerPairTripleTechnique(List<Cage> cages)
     {
@@ -21,7 +23,7 @@ public class KillerPairTripleTechnique : ISolvingTechnique
 
     public int Level => 3;
 
-    public string Name => "Killer Pair / Triple";
+    public string Name => "Killer Pair / Triple / Quad";
 
     public bool PlacesValue => false;
 
@@ -29,7 +31,8 @@ public class KillerPairTripleTechnique : ISolvingTechnique
     {
         foreach (var cage in _cages)
         {
-            var analysis = CageCombinatorics.AnalyzeCage(
+            var analysis = _cache.GetOrAnalyze(
+                cage,
                 board,
                 candidates,
                 cage.Cells,
@@ -37,7 +40,7 @@ public class KillerPairTripleTechnique : ISolvingTechnique
 
             var remaining = analysis.Remaining;
 
-            if (remaining.Count != 2 && remaining.Count != 3)
+            if (remaining.Count < 2 || remaining.Count > 4)
                 continue;
 
             if (analysis.Assignments.Count == 0)

@@ -50,7 +50,7 @@ public class DifficultyScorer
         ["Locked Candidates"] = 3,
         ["Killer Locked Candidates"] = 5,
         ["Innie / Outie"] = 6,
-        ["Killer Pair / Triple"] = 8,
+        ["Killer Pair / Triple / Quad"] = 10,
 
         // Subsets
         ["Naked Pair"] = 3,

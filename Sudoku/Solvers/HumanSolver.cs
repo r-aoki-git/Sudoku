@@ -183,6 +183,27 @@ public class HumanSolver
                 int remainingCells =
                     CountRemainingCells(workingBoard);
 
+                // Masterは「人間解法だけでは解ききれない」ことこそが判定条件であり、
+                // Master以外を狙っている場合はフォールバック（重いバックトラッキング）の
+                // 結果は呼び出し側で使われない。無条件にフォールバックを実行すると、
+                // Easy/Normal/Hard/Expertを狙う全試行で毎回最大数秒を浪費するため、
+                // ここで即座にStuckとして打ち切る。
+                bool needsFallbackSolve =
+                    !targetDifficulty.HasValue ||
+                    targetDifficulty.Value == Difficulty.Master;
+
+                if (!needsFallbackSolve)
+                {
+                    return new HumanSolveResult(
+                        Solved: false,
+                        RequiredFallback: true,
+                        FallbackSolved: false,
+                        MaxLevelUsed: maxLevelUsed,
+                        RemainingCells: remainingCells,
+                        TechniqueUsageCounts: usageCounts,
+                        TechniqueUsageByName: usageByName);
+                }
+
                 bool solvedByFallback =
                     _fallbackSolve(
                         workingBoard,

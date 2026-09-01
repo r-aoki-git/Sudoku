@@ -9,6 +9,15 @@ namespace Sudoku.Solvers;
 public class CandidateGrid
 {
     private readonly HashSet<int>[,] _candidates = new HashSet<int>[Board.Size, Board.Size];
+    private readonly int[,] _version = new int[Board.Size, Board.Size];
+
+    private static int _instanceSeq = 0;
+
+    /// <summary>
+    /// このインスタンス固有のID。CageAnalysisCacheが「CandidateGridが丸ごと
+    /// 再生成された（世代が変わった）」ことを検出するために使う。
+    /// </summary>
+    public int InstanceId { get; } = System.Threading.Interlocked.Increment(ref _instanceSeq);
 
     public static CandidateGrid Calculate(Board board)
     {
@@ -46,6 +55,15 @@ public class CandidateGrid
 
     public HashSet<int> GetCandidates(int row, int col) => _candidates[row, col];
 
+    /// <summary>指定したマスの候補が最後に変化した時点のバージョン番号。</summary>
+    public int GetVersion(int row, int col) => _version[row, col];
+
     /// <summary>指定したマスの候補から数字を1つ取り除く。取り除けたら true。</summary>
-    public bool EliminateCandidate(int row, int col, int digit) => _candidates[row, col].Remove(digit);
+    public bool EliminateCandidate(int row, int col, int digit)
+    {
+        bool removed = _candidates[row, col].Remove(digit);
+        if (removed)
+            _version[row, col]++;
+        return removed;
+    }
 }

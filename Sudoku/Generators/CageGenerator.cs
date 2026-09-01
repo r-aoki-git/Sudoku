@@ -31,23 +31,65 @@ public sealed class CageGenerator
     /// </summary>
     private static readonly Dictionary<
         Difficulty,
-        (int MaxSize, double MinAvg, double TargetAvg, double MaxAvg, int MaxSingles)>
+        (
+            int MaxSize,
+            double MinAvg,
+            double TargetAvg,
+            double MaxAvg,
+            int MaxSingles,
+            int MaxSize5
+        )>
         DifficultyParams = new()
         {
             [Difficulty.Easy] =
-                (MaxSize: 4, MinAvg: 1.5, TargetAvg: 1.8, MaxAvg: 2.5, MaxSingles: 20),
+                (
+                    MaxSize: 4,
+                    MinAvg: 1.5,
+                    TargetAvg: 1.8,
+                    MaxAvg: 2.5,
+                    MaxSingles: 20,
+                    MaxSize5: 0
+                ),
 
             [Difficulty.Normal] =
-                (MaxSize: 5, MinAvg: 2.0, TargetAvg: 2.3, MaxAvg: 3.0, MaxSingles: 14),
+                (
+                    MaxSize: 5,
+                    MinAvg: 2.0,
+                    TargetAvg: 2.3,
+                    MaxAvg: 3.0,
+                    MaxSingles: 14,
+                    MaxSize5: 3
+                ),
 
             [Difficulty.Hard] =
-                (MaxSize: 6, MinAvg: 2.5, TargetAvg: 3.1, MaxAvg: 4.0, MaxSingles: 7),
+                (
+                    MaxSize: 5,
+                    MinAvg: 2.2,
+                    TargetAvg: 2.6,
+                    MaxAvg: 3.4,
+                    MaxSingles: 9,
+                    MaxSize5: 4
+                ),
 
             [Difficulty.Expert] =
-                (MaxSize: 7, MinAvg: 3.0, TargetAvg: 3.8, MaxAvg: 5.0, MaxSingles: 5),
+                (
+                    MaxSize: 7,
+                    MinAvg: 3.0,
+                    TargetAvg: 3.8,
+                    MaxAvg: 5.0,
+                    MaxSingles: 5,
+                    MaxSize5: 8
+                ),
 
             [Difficulty.Master] =
-                (MaxSize: 8, MinAvg: 3.5, TargetAvg: 4.2, MaxAvg: 5.5, MaxSingles: 3),
+                (
+                    MaxSize: 8,
+                    MinAvg: 3.5,
+                    TargetAvg: 4.2,
+                    MaxAvg: 5.5,
+                    MaxSingles: 3,
+                    MaxSize5: 12
+                ),
         };
 
     /// <summary>
@@ -98,7 +140,8 @@ public sealed class CageGenerator
                 param.MinAvg,
                 param.TargetAvg,
                 param.MaxAvg,
-                param.MaxSingles);
+                param.MaxSingles,
+                param.MaxSize5);
 
             if (cageIndices is null)
                 continue;
@@ -136,7 +179,8 @@ public sealed class CageGenerator
         double minAvg,
         double targetAvg,
         double maxAvg,
-        int maxSingles)
+        int maxSingles,
+        int maxSize5)
     {
         // ----- Union-Find 初期化 -----
         var parent = new int[CellCount];
@@ -212,12 +256,28 @@ public sealed class CageGenerator
                 if (newSize > maxSize)
                     continue;
 
-                if ((digitMask[rootA] &
-                     digitMask[rootB]) != 0)
-                {
+                if ((digitMask[rootA] & digitMask[rootB]) != 0)
                     continue;
+
+                if (newSize == 5)
+                {
+                    int currentSize5Count =
+                        CountCagesOfSize(
+                            parent,
+                            size,
+                            5);
+
+                    if (currentSize5Count >= maxSize5)
+                        continue;
                 }
 
+                // --------------------------------------------------------
+                // 単セルを優先的に減らす。
+                //
+                // どちらかが単セルなら、そのマージを優先する。
+                // 現在のforeach順自体がランダムなので、
+                // 「単セルを含む辺」を見つけた場合は即マージする。
+                // --------------------------------------------------------
                 // --------------------------------------------------------
                 // 単セルを優先的に減らす。
                 //
@@ -251,10 +311,21 @@ public sealed class CageGenerator
                 // 大きなケージを先に作りすぎると、
                 // 終盤でサイズ上限に引っ掛かりやすくなる。
                 // --------------------------------------------------------
-                if (newSize > 4 &&
-                    cageCount > targetCageCount + 3)
+                if (newSize >= 5 &&
+                    cageCount > targetCageCount + 2)
                 {
                     continue;
+                }
+
+                if (newSize == 5)
+                {
+                    int currentSize5Count = CountCagesOfSize(
+                        parent,
+                        size,
+                        5);
+
+                    if (currentSize5Count >= maxSize5)
+                        continue;
                 }
 
                 Union(
@@ -267,6 +338,75 @@ public sealed class CageGenerator
 
                 cageCount--;
                 mergedThisPass = true;
+            }
+
+            if (!mergedThisPass)
+                break;
+        }
+
+        // ------------------------------------------------------------
+        // 単セル解消専用パス。
+        //
+        // 上のメインループは cageCount <= targetCageCount に達した時点で
+        // 即座に打ち切られるため、目標ケージ数へ到達していても
+        // 単セルが大量に残存するケースがある。この状態は下のValidateAndExtract
+        // の singles 上限チェックで必ず弾かれ、再試行を無駄に繰り返す原因になる。
+        //
+        // そこで、目標ケージ数への到達可否とは無関係に、
+        // 残っている単セルを maxSingles を満たすまで追加でマージする。
+        // ------------------------------------------------------------
+        const int MaxSingleCleanupPasses = 8;
+
+        for (int cleanupPass = 0; cleanupPass < MaxSingleCleanupPasses; cleanupPass++)
+        {
+            if (CountSingles(parent, size) <= maxSingles)
+                break;
+
+            var edgeIndices = ShuffledEdgeIndices();
+            bool mergedThisPass = false;
+
+            foreach (int edgeIdx in edgeIndices)
+            {
+                var (a, b) = AllEdges[edgeIdx];
+
+                int rootA = Find(parent, a);
+                int rootB = Find(parent, b);
+
+                if (rootA == rootB)
+                    continue;
+
+                bool hasSingle = size[rootA] == 1 || size[rootB] == 1;
+                if (!hasSingle)
+                    continue;
+
+                int newSize =
+                    size[rootA] +
+                    size[rootB];
+
+                if (newSize > maxSize)
+                    continue;
+
+                if ((digitMask[rootA] & digitMask[rootB]) != 0)
+                    continue;
+
+                if (newSize == 5)
+                {
+                    int currentSize5Count =
+                        CountCagesOfSize(
+                            parent,
+                            size,
+                            5);
+
+                    if (currentSize5Count >= maxSize5)
+                        continue;
+                }
+
+                Union(parent, rank, size, digitMask, rootA, rootB);
+                cageCount--;
+                mergedThisPass = true;
+
+                if (CountSingles(parent, size) <= maxSingles)
+                    break;
             }
 
             if (!mergedThisPass)
@@ -293,19 +433,30 @@ public sealed class CageGenerator
         int singles =
             cages.Count(c => c.Count == 1);
 
-        // ------------------------------------------------------------
-        // TargetAvgから大きく離れた結果は再試行へ回す。
-        //
-        // 許容範囲[min,max]だけでなく、
-        // 「狙った分布に近いか」も生成段階で判定する。
-        // ------------------------------------------------------------
-        const double TargetTolerance = 0.35;
+        int size5Count =
+            cages.Count(c => c.Count == 5);
+
+        const double TargetTolerance = 0.5;
 
         if (Math.Abs(avgSize - targetAvg) > TargetTolerance)
             return null;
 
         if (singles > maxSingles)
             return null;
+
+        if (size5Count > maxSize5)
+            return null;
+
+        // 直前の2条件を通過している以上、この時点でAvgSize・Singlesは
+        // 必ず許容範囲内のはず。生成ログの実測値がこの前提と食い違う場合、
+        // 呼び出し元でparamの取り違えや競合が起きている可能性があるため、
+        // デバッグビルドで即座に検知できるようにしておく。
+        System.Diagnostics.Debug.Assert(
+            Math.Abs(avgSize - targetAvg) <= TargetTolerance,
+            $"AvgSize({avgSize:F2})がTargetAvg({targetAvg:F2})±{TargetTolerance}の範囲外です。");
+        System.Diagnostics.Debug.Assert(
+            singles <= maxSingles,
+            $"Singles({singles})がMaxSingles({maxSingles})を超えています。");
 
         return cages;
     }
@@ -343,6 +494,46 @@ public sealed class CageGenerator
 
         if (rank[rootA] == rank[rootB])
             rank[rootA]++;
+    }
+
+    /// <summary>
+    /// 現在のUnion-Find状態における単セルケージ（サイズ1のケージ）の数を数える。
+    /// </summary>
+    private static int CountSingles(int[] parent, int[] size)
+    {
+        int count = 0;
+        var seenRoots = new HashSet<int>();
+
+        for (int i = 0; i < CellCount; i++)
+        {
+            int root = Find(parent, i);
+            if (seenRoots.Add(root) && size[root] == 1)
+                count++;
+        }
+
+        return count;
+    }
+
+    private static int CountCagesOfSize(
+    int[] parent,
+    int[] size,
+    int targetSize)
+    {
+        int count = 0;
+        var seenRoots = new HashSet<int>();
+
+        for (int i = 0; i < CellCount; i++)
+        {
+            int root = Find(parent, i);
+
+            if (!seenRoots.Add(root))
+                continue;
+
+            if (size[root] == targetSize)
+                count++;
+        }
+
+        return count;
     }
 
     /// <summary>

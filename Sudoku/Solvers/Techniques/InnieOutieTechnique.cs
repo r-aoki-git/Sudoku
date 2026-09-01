@@ -1,4 +1,5 @@
 ﻿using Sudoku.Models;
+using static Sudoku.Solvers.CageCombinatorics;
 
 namespace Sudoku.Solvers.Techniques;
 
@@ -6,11 +7,29 @@ namespace Sudoku.Solvers.Techniques;
 /// レベル3：イニー/アウティー。45の法則を、複数マスにまたがるケージにも一般化したもの。
 /// あるユニットで、はみ出すケージがちょうど1つ・かつユニット内のマスが2個以上の場合、
 /// それらを「仮想ケージ（合計=45 - 完全内包ケージの合計）」とみなして候補を絞り込む
+///
+/// ケージ構造は生成後不変なので、対象となる仮想ケージはコンストラクタで一度だけ
+/// 洗い出しておく。TryApply側は毎回のグルーピング処理を行わず、
+/// 事前計算済みリストのみを走査する。
 /// </summary>
 public class InnieOutieTechnique : ISolvingTechnique
 {
     private const int UnitSum = 45;
     private readonly Dictionary<(int Row, int Col), Cage> _cageByCell;
+    private readonly List<VirtualCage> _virtualCages;
+    private readonly CageAnalysisCache _cache = new();
+
+    private sealed class VirtualCage
+    {
+        public List<(int Row, int Col)> Cells { get; }
+        public int TargetSum { get; }
+
+        public VirtualCage(List<(int Row, int Col)> cells, int targetSum)
+        {
+            Cells = cells;
+            TargetSum = targetSum;
+        }
+    }
 
     public InnieOutieTechnique(List<Cage> cages)
     {
@@ -18,6 +37,8 @@ public class InnieOutieTechnique : ISolvingTechnique
         foreach (var cage in cages)
             foreach (var cell in cage.Cells)
                 _cageByCell[cell] = cage;
+
+        _virtualCages = BuildVirtualCages();
     }
 
     public int Level => 3;
@@ -26,51 +47,17 @@ public class InnieOutieTechnique : ISolvingTechnique
 
     public bool TryApply(Board board, CandidateGrid candidates)
     {
-        for (int i = 0; i < Board.Size; i++)
+        foreach (var virtualCage in _virtualCages)
         {
-            if (TryUnit(board, candidates, BoardUnits.Row(i))) return true;
-            if (TryUnit(board, candidates, BoardUnits.Column(i))) return true;
+            if (TryVirtualCage(board, candidates, virtualCage))
+                return true;
         }
-
-        for (int boxRow = 0; boxRow < Board.Size; boxRow += Board.BoxSize)
-            for (int boxCol = 0; boxCol < Board.Size; boxCol += Board.BoxSize)
-                if (TryUnit(board, candidates, BoardUnits.Box(boxRow, boxCol))) return true;
-
         return false;
     }
 
-    private bool TryUnit(Board board, CandidateGrid candidates, List<(int row, int col)> unitCells)
+    private bool TryVirtualCage(Board board, CandidateGrid candidates, VirtualCage virtualCage)
     {
-        var cageGroups = unitCells.GroupBy(cell => _cageByCell[cell]);
-
-        int fullyContainedSum = 0;
-        List<(int row, int col)>? crossingCellsInUnit = null;
-
-        foreach (var group in cageGroups)
-        {
-            var cage = group.Key;
-            var cellsInUnit = group.ToList();
-
-            if (cellsInUnit.Count == cage.Cells.Count)
-                fullyContainedSum += cage.TargetSum;
-            else
-            {
-                if (crossingCellsInUnit != null) return false;
-                crossingCellsInUnit = cellsInUnit;
-            }
-        }
-
-        if (crossingCellsInUnit is null || crossingCellsInUnit.Count < 2) return false;
-
-        int virtualTargetSum = UnitSum - fullyContainedSum;
-
-        var castCells = crossingCellsInUnit.Select(c => (Row: c.row, Col: c.col)).ToList();
-
-        var analysis = CageCombinatorics.AnalyzeCage(
-            board,
-            candidates,
-            castCells,
-            virtualTargetSum);
+        var analysis = _cache.GetOrAnalyze(virtualCage, board, candidates, virtualCage.Cells, virtualCage.TargetSum);
 
         if (analysis.Remaining.Count == 0 || analysis.Assignments.Count == 0)
             return false;
@@ -94,8 +81,6 @@ public class InnieOutieTechnique : ISolvingTechnique
             }
         }
 
-        // ここは候補が1つ絞られるたびに呼ばれるホットパス。
-        // 既定では出力しない（SolverDiagnostics.VerboseLoggingを参照）。
         if (changed && SolverDiagnostics.VerboseLogging)
         {
             System.Diagnostics.Debug.WriteLine(
@@ -104,5 +89,67 @@ public class InnieOutieTechnique : ISolvingTechnique
         }
 
         return changed;
+    }
+
+    private List<VirtualCage> BuildVirtualCages()
+    {
+        var result = new List<VirtualCage>();
+
+        foreach (var unit in EnumerateUnits())
+        {
+            var virtualCage = TryBuildVirtualCage(unit);
+
+            // イニー/アウティーは「ユニット内のマスが2個以上」の場合のみ対象
+            if (virtualCage != null && virtualCage.Cells.Count >= 2)
+                result.Add(virtualCage);
+        }
+
+        return result;
+    }
+
+    private VirtualCage? TryBuildVirtualCage(List<(int row, int col)> unitCells)
+    {
+        var cageGroups = unitCells.GroupBy(cell => _cageByCell[cell]);
+
+        int fullyContainedSum = 0;
+        List<(int row, int col)>? crossingCellsInUnit = null;
+
+        foreach (var group in cageGroups)
+        {
+            var cage = group.Key;
+            var cellsInUnit = group.ToList();
+
+            if (cellsInUnit.Count == cage.Cells.Count)
+            {
+                fullyContainedSum += cage.TargetSum;
+                continue;
+            }
+
+            if (crossingCellsInUnit != null)
+                return null;
+
+            crossingCellsInUnit = cellsInUnit;
+        }
+
+        if (crossingCellsInUnit is null)
+            return null;
+
+        int virtualTargetSum = UnitSum - fullyContainedSum;
+        var cells = crossingCellsInUnit.Select(c => (Row: c.row, Col: c.col)).ToList();
+
+        return new VirtualCage(cells, virtualTargetSum);
+    }
+
+    private static IEnumerable<List<(int row, int col)>> EnumerateUnits()
+    {
+        for (int i = 0; i < Board.Size; i++)
+        {
+            yield return BoardUnits.Row(i);
+            yield return BoardUnits.Column(i);
+        }
+
+        for (int boxRow = 0; boxRow < Board.Size; boxRow += Board.BoxSize)
+            for (int boxCol = 0; boxCol < Board.Size; boxCol += Board.BoxSize)
+                yield return BoardUnits.Box(boxRow, boxCol);
     }
 }

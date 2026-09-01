@@ -343,4 +343,58 @@ public static (
 
         return allowed;
     }
+
+    /// <summary>
+    /// AnalyzeCage（候補ベース版）の呼び出し結果をキャッシュする。
+    ///
+    /// HumanSolverのメインループは候補を1つ絞り込むたびに全テクニックを最初から
+    /// 試行し直すため、内容が変わっていない同一ケージ（または仮想ケージ）に対して
+    /// AnalyzeCageが極めて高頻度に呼び出される。
+    /// 対象セルの確定値・候補バージョンが前回と一致する場合は再計算をスキップする。
+    /// </summary>
+    public sealed class CageAnalysisCache
+    {
+        private readonly Dictionary<object, (int InstanceId, long VersionKey, CageCombinatorics.CageAnalysis Result)> _cache = new();
+
+        public CageCombinatorics.CageAnalysis GetOrAnalyze(
+            object cacheKey,
+            Board board,
+            CandidateGrid candidates,
+            IReadOnlyList<(int Row, int Col)> cells,
+            int targetSum)
+        {
+            long versionKey = ComputeVersionKey(board, candidates, cells);
+
+            if (_cache.TryGetValue(cacheKey, out var cached) &&
+                cached.InstanceId == candidates.InstanceId &&
+                cached.VersionKey == versionKey)
+            {
+                return cached.Result;
+            }
+
+            var result = CageCombinatorics.AnalyzeCage(board, candidates, cells, targetSum);
+            _cache[cacheKey] = (candidates.InstanceId, versionKey, result);
+            return result;
+        }
+
+        private static long ComputeVersionKey(
+            Board board,
+            CandidateGrid candidates,
+            IReadOnlyList<(int Row, int Col)> cells)
+        {
+            unchecked
+            {
+                long hash = 17;
+                foreach (var (row, col) in cells)
+                {
+                    var cell = board.GetCell(row, col);
+                    int valuePart = cell.HasValue ? cell.Value!.Value : 0;
+                    int versionPart = candidates.GetVersion(row, col);
+                    hash = hash * 31 + valuePart;
+                    hash = hash * 31 + versionPart;
+                }
+                return hash;
+            }
+        }
+    }
 }

@@ -24,6 +24,13 @@ public class KillerSudokuGenerator
     // 難易度判定に使う予算
     private const int HumanBudgetMs = 1500;
 
+    // 唯一解検証（バックトラッキング）に使う予算。
+    // 難易度判定より先に実行し、複数解になる無駄なケージ構成に対して
+    // コストの高い人間解法テクニック群を走らせないようにする。
+    // 制約伝播による早期終了（KillerBacktrackingSolver.minFilledAfterPropagation）が
+    // あるため、多くの場合はこの予算を使い切る前に判定が完了する。
+    private const int UniquenessBudgetMs = 1000;
+
     private readonly Random _random;
     private readonly BacktrackingSolver _solver;
     private readonly CageGenerator _cageGenerator;
@@ -99,6 +106,7 @@ public class KillerSudokuGenerator
                     Math.Max(
                         MinAttemptBudgetMs,
                         remaining -
+                        UniquenessBudgetMs -
                         HumanBudgetMs -
                         MinAttemptBudgetMs));
 
@@ -123,6 +131,56 @@ public class KillerSudokuGenerator
             _attemptsSinceNewSolution++;
             _totalAttempts++;
 
+            // ---------------------------------------------------------
+            // ① 先に唯一解を検証する。
+            // 複数解になるケージ構成はここで破棄し、
+            // コストの高い人間解法の判定（②）を無駄に行わないようにする。
+            // ---------------------------------------------------------
+            remaining =
+                budgetMs -
+                overallStopwatch.ElapsedMilliseconds;
+
+            if (remaining < MinAttemptBudgetMs)
+                break;
+
+            int uniquenessBudget =
+                (int)Math.Min(
+                    UniquenessBudgetMs,
+                    remaining);
+
+            var killerSolver =
+                new KillerBacktrackingSolver(
+                    cages,
+                    cancellationToken);
+
+            // 難易度が上がるほど、制約伝播だけでは埋まりにくい構造になりやすい。
+            // 閾値を下げすぎず、かつ高難易度側で不当に早期棄却しないよう
+            // 難易度に応じて可変にする。
+            int solutionCount =
+                killerSolver.CountSolutions(
+                    new Board(),
+                    limit: 2,
+                    timeBudgetMs: uniquenessBudget,
+                    minFilledAfterPropagation: GetMinFilledThreshold(difficulty),
+                    cancellationToken: cancellationToken);
+
+            if (solutionCount != 1)
+            {
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    Debug.WriteLine(
+                        $"[UniquenessReject] " +
+                        $"Result={solutionCount}, " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"Budget={uniquenessBudget}ms");
+                }
+
+                continue;
+            }
+
+            // ---------------------------------------------------------
+            // ② 唯一解が確認できたケージ構成についてのみ、難易度判定を行う。
+            // ---------------------------------------------------------
             remaining =
                 budgetMs -
                 overallStopwatch.ElapsedMilliseconds;
@@ -176,42 +234,16 @@ public class KillerSudokuGenerator
                     $"Remaining={difficultyResult.Remaining}");
             }
 
+            // Masterは「人間解法だけでは解ききれない」ことこそが判定条件のため、
+            // RequiredFallback=true自体を理由に破棄してはならない。
+            // フォールバックでも実際には解けなかった場合だけ破棄する。
             if (humanResult.RequiredFallback)
-                continue;
-
-            if (difficultyResult.Label != difficulty)
-                continue;
-
-            remaining =
-                budgetMs -
-                overallStopwatch.ElapsedMilliseconds;
-
-            if (remaining < MinAttemptBudgetMs)
-                break;
-
-            var killerSolver =
-                new KillerBacktrackingSolver(
-                    cages,
-                    cancellationToken);
-
-            int solutionCount =
-                killerSolver.CountSolutions(
-                    new Board(),
-                    limit: 2,
-                    timeBudgetMs: (int)remaining,
-                    cancellationToken: cancellationToken);
-
-            if (solutionCount != 1)
             {
-                if (SolverDiagnostics.VerboseLogging)
-                {
-                    Debug.WriteLine(
-                        $"[UniquenessReject] " +
-                        $"Result={solutionCount}, " +
-                        $"Attempts={_totalAttempts}, " +
-                        $"Remaining={remaining}ms");
-                }
-
+                if (difficulty != Difficulty.Master || !humanResult.FallbackSolved)
+                    continue;
+            }
+            else if (difficultyResult.Label != difficulty)
+            {
                 continue;
             }
 
@@ -229,6 +261,24 @@ public class KillerSudokuGenerator
 
         return null;
     }
+
+    /// <summary>
+    /// 唯一解検証（KillerBacktrackingSolver.CountSolutions）における、
+    /// 「制約伝播だけでこのマス数以上埋まらなければ見込み薄として打ち切る」閾値。
+    /// 難易度が高いケージ構成ほど制約伝播だけでは埋まりにくいため、
+    /// 一律45で固定すると本来唯一解であるHard/Expert/Master構成まで
+    /// 早期棄却してしまう。難易度に応じて閾値を下げ、精度（正しい難易度の
+    /// 構成を取りこぼさないこと）を優先する。
+    /// </summary>
+    private static int GetMinFilledThreshold(Difficulty difficulty) => difficulty switch
+    {
+        Difficulty.Easy => 50,
+        Difficulty.Normal => 45,
+        Difficulty.Hard => 35,
+        Difficulty.Expert => 25,
+        Difficulty.Master => 15,
+        _ => 45,
+    };
 
     /// <summary>完成盤面（正解）とケージ分割の両方を返す。</summary>
     public (Board Solution, List<Cage> Cages) Generate(

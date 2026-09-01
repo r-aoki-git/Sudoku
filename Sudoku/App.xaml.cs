@@ -16,9 +16,14 @@ namespace Sudoku
         {
             base.OnStartup(e);
 
+            // 原因確認用の一時的な診断出力。
+            // [CageGenerator] のSingles/AvgSizeと、[DifficultyCheck]/[UniquenessReject]
+            // のログを確認したら、確認後は必ず false に戻すこと。
+            SolverDiagnostics.VerboseLogging = true;
+
             var scorer = new DifficultyScorer();
 
-            const int TestCount = 1;
+            const int TestCount = 5;
 
             foreach (var requestedDifficulty in new[]
             {

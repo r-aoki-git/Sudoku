@@ -1,4 +1,5 @@
 ﻿using Sudoku.Models;
+using static Sudoku.Solvers.CageCombinatorics;
 
 namespace Sudoku.Solvers.Techniques;
 
@@ -10,6 +11,7 @@ namespace Sudoku.Solvers.Techniques;
 public class CageForcedComboTechnique : ISolvingTechnique
 {
     private readonly List<Cage> _cages;
+    private readonly CageAnalysisCache _cache = new();
 
     public CageForcedComboTechnique(List<Cage> cages)
     {
@@ -24,7 +26,7 @@ public class CageForcedComboTechnique : ISolvingTechnique
     {
         foreach (var cage in _cages)
         {
-            var analysis = CageCombinatorics.AnalyzeCage(board, candidates, cage.Cells, cage.TargetSum);
+            var analysis = _cache.GetOrAnalyze(cage, board, candidates, cage.Cells, cage.TargetSum);
 
             if (analysis.Remaining.Count == 0)
                 continue;
