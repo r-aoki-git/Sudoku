@@ -158,7 +158,7 @@ public class HumanSolver
                 if (targetDifficulty.HasValue &&
                     !DifficultyScorer.CanStillReach(
                         targetDifficulty.Value,
-                        maxLevelUsed,
+                        usageCounts,
                         usageByName))
                 {
                     int remainingCells =
@@ -183,14 +183,17 @@ public class HumanSolver
                 int remainingCells =
                     CountRemainingCells(workingBoard);
 
-                // Masterは「人間解法だけでは解ききれない」ことこそが判定条件であり、
-                // Master以外を狙っている場合はフォールバック（重いバックトラッキング）の
-                // 結果は呼び出し側で使われない。無条件にフォールバックを実行すると、
-                // Easy/Normal/Hard/Expertを狙う全試行で毎回最大数秒を浪費するため、
-                // ここで即座にStuckとして打ち切る。
+                // 難易度判定のために呼ばれている場合（targetDifficultyあり）、
+                // 詰まった盤面はどの難易度としても採用されない。
+                // Masterであっても「人間解法で解ける」ことを条件にしているため、
+                // ここで重いバックトラッキングを走らせても結果は使われない。
+                // 生成の全試行でこれを実行すると1回あたり最大数秒を浪費するので、
+                // 即座にStuckとして打ち切る。
+                //
+                // targetDifficultyがnullの場合（「解答を見る」機能など）は
+                // 解を出すこと自体が目的なので、フォールバックする。
                 bool needsFallbackSolve =
-                    !targetDifficulty.HasValue ||
-                    targetDifficulty.Value == Difficulty.Master;
+                    !targetDifficulty.HasValue;
 
                 if (!needsFallbackSolve)
                 {

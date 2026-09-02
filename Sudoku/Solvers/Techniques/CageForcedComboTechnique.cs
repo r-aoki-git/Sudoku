@@ -1,17 +1,24 @@
-﻿using Sudoku.Models;
+using Sudoku.Models;
 using static Sudoku.Solvers.CageCombinatorics;
 
 namespace Sudoku.Solvers.Techniques;
 
 /// <summary>
-/// レベル1: ケージの合計値から、残りマスに入りうる数字の組み合わせを求め、
-/// その組み合わせに一切現れない数字を候補から取り除く。
+/// レベル1: ケージの合計値だけを見て、残りマスに入りうる数字の和集合を求め、
+/// そこに一切現れない数字を候補から取り除く。
 /// （例：2マスで合計3のケージ → {1, 2}以外の数字はどちらのマスにも入りえない）
+///
+/// これは初心者が「組み合わせ表」を引いて行う推論に相当する。
+/// 各セルの現在の候補は考慮せず、ケージ内の確定値と合計値だけを使う。
+///
+/// 各セルの候補まで突き合わせた厳密な割り当て解析は、
+/// 人間にとっては明確に上位の推論なので <see cref="CageCombinationTechnique"/>（レベル3）
+/// として分離している。両者を同じレベル1に混ぜると、レベル1だけで
+/// ほぼ全ての盤面が解けてしまい、難易度の階段が成立しなくなる。
 /// </summary>
 public class CageForcedComboTechnique : ISolvingTechnique
 {
     private readonly List<Cage> _cages;
-    private readonly CageAnalysisCache _cache = new();
 
     public CageForcedComboTechnique(List<Cage> cages)
     {
@@ -26,28 +33,24 @@ public class CageForcedComboTechnique : ISolvingTechnique
     {
         foreach (var cage in _cages)
         {
-            var analysis = _cache.GetOrAnalyze(cage, board, candidates, cage.Cells, cage.TargetSum);
+            var (remaining, combos) =
+                CageCombinatorics.AnalyzeCage(
+                    board,
+                    cage.Cells,
+                    cage.TargetSum);
 
-            if (analysis.Remaining.Count == 0)
+            if (remaining.Count == 0 || combos.Count == 0)
                 continue;
 
-            if (analysis.Assignments.Count == 0)
-                continue;
-
-            var allowed = CageCombinatorics.GetAllowedDigits(analysis);
+            var allowed = CageCombinatorics.UnionDigits(combos);
 
             bool changed = false;
 
-            for (int i = 0; i < analysis.Remaining.Count; i++)
+            foreach (var (row, col) in remaining)
             {
-                var (row, col) = analysis.Remaining[i];
-
-                var currentCandidates =
-                    candidates.GetCandidates(row, col).ToList();
-
-                foreach (int digit in currentCandidates)
+                foreach (int digit in candidates.GetCandidates(row, col).ToList())
                 {
-                    if (allowed[i].Contains(digit))
+                    if (allowed.Contains(digit))
                         continue;
 
                     if (candidates.EliminateCandidate(row, col, digit))
@@ -58,6 +61,7 @@ public class CageForcedComboTechnique : ISolvingTechnique
             if (changed)
                 return true;
         }
+
         return false;
     }
 }

@@ -41,6 +41,7 @@ public class KillerHumanSolver : HumanSolver
         // レベル3
         // ---------------------------------------------------------
         new KillerLockedCandidatesTechnique(),
+        new CageCombinationTechnique(cages),
         new KillerPairTripleTechnique(cages),
         new InnieOutieTechnique(cages),
 

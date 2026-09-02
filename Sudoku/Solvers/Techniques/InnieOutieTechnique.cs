@@ -1,21 +1,26 @@
-﻿using Sudoku.Models;
+using Sudoku.Models;
 using static Sudoku.Solvers.CageCombinatorics;
 
 namespace Sudoku.Solvers.Techniques;
 
 /// <summary>
-/// レベル3：イニー/アウティー。45の法則を、複数マスにまたがるケージにも一般化したもの。
-/// あるユニットで、はみ出すケージがちょうど1つ・かつユニット内のマスが2個以上の場合、
-/// それらを「仮想ケージ（合計=45 - 完全内包ケージの合計）」とみなして候補を絞り込む
+/// レベル3：イニー/アウティー（複数ユニット版）。
 ///
-/// ケージ構造は生成後不変なので、対象となる仮想ケージはコンストラクタで一度だけ
-/// 洗い出しておく。TryApply側は毎回のグルーピング処理を行わず、
-/// 事前計算済みリストのみを走査する。
+/// 45の法則を、隣接する2〜3本の行・列、および横3ブロック / 縦3ブロックの帯へ
+/// 一般化したもの。k本のユニットの合計は必ず 45*k になるので、
+/// 帯に完全に内包されるケージの合計を差し引けば、はみ出しているケージの
+/// 「帯の内側にあるセル」の合計が求まる。
+///
+/// 単一ユニット版は <see cref="FortyFiveRuleTechnique"/>（レベル2）が担当する。
+/// こちらは帯の幅が2以上のケースだけを対象にすることで、
+/// 45の法則の単なる再実行にならないようにしている
+/// （幅1の帯を含めてしまうと、レベル2で必ず先に処理されるため
+/// このテクニックは一度も発火しなくなる）。
 /// </summary>
 public class InnieOutieTechnique : ISolvingTechnique
 {
     private const int UnitSum = 45;
-    private readonly Dictionary<(int Row, int Col), Cage> _cageByCell;
+
     private readonly List<VirtualCage> _virtualCages;
     private readonly CageAnalysisCache _cache = new();
 
@@ -33,12 +38,13 @@ public class InnieOutieTechnique : ISolvingTechnique
 
     public InnieOutieTechnique(List<Cage> cages)
     {
-        _cageByCell = new Dictionary<(int, int), Cage>();
+        var cageByCell = new Dictionary<(int Row, int Col), Cage>();
+
         foreach (var cage in cages)
             foreach (var cell in cage.Cells)
-                _cageByCell[cell] = cage;
+                cageByCell[cell] = cage;
 
-        _virtualCages = BuildVirtualCages();
+        _virtualCages = BuildVirtualCages(cageByCell);
     }
 
     public int Level => 3;
@@ -52,12 +58,19 @@ public class InnieOutieTechnique : ISolvingTechnique
             if (TryVirtualCage(board, candidates, virtualCage))
                 return true;
         }
+
         return false;
     }
 
     private bool TryVirtualCage(Board board, CandidateGrid candidates, VirtualCage virtualCage)
     {
-        var analysis = _cache.GetOrAnalyze(virtualCage, board, candidates, virtualCage.Cells, virtualCage.TargetSum);
+        var analysis =
+            _cache.GetOrAnalyze(
+                virtualCage,
+                board,
+                candidates,
+                virtualCage.Cells,
+                virtualCage.TargetSum);
 
         if (analysis.Remaining.Count == 0 || analysis.Assignments.Count == 0)
             return false;
@@ -81,75 +94,99 @@ public class InnieOutieTechnique : ISolvingTechnique
             }
         }
 
-        if (changed && SolverDiagnostics.VerboseLogging)
-        {
-            System.Diagnostics.Debug.WriteLine(
-                $"[InnieOutie] Remaining={analysis.Remaining.Count}, " +
-                $"Assignments={analysis.Assignments.Count}");
-        }
-
         return changed;
     }
 
-    private List<VirtualCage> BuildVirtualCages()
+    private static List<VirtualCage> BuildVirtualCages(
+        Dictionary<(int Row, int Col), Cage> cageByCell)
     {
         var result = new List<VirtualCage>();
 
-        foreach (var unit in EnumerateUnits())
+        foreach (var (region, unitCount) in EnumerateRegions())
         {
-            var virtualCage = TryBuildVirtualCage(unit);
+            var virtualCage =
+                TryBuildVirtualCage(
+                    cageByCell,
+                    region,
+                    unitCount);
 
-            // イニー/アウティーは「ユニット内のマスが2個以上」の場合のみ対象
-            if (virtualCage != null && virtualCage.Cells.Count >= 2)
+            if (virtualCage != null)
                 result.Add(virtualCage);
         }
 
         return result;
     }
 
-    private VirtualCage? TryBuildVirtualCage(List<(int row, int col)> unitCells)
+    /// <summary>
+    /// 帯に完全内包されるケージの合計を 45*unitCount から差し引き、
+    /// はみ出しているケージが1つだけなら仮想ケージを作る。
+    /// </summary>
+    private static VirtualCage? TryBuildVirtualCage(
+        Dictionary<(int Row, int Col), Cage> cageByCell,
+        List<(int Row, int Col)> regionCells,
+        int unitCount)
     {
-        var cageGroups = unitCells.GroupBy(cell => _cageByCell[cell]);
+        int containedSum = 0;
+        List<(int Row, int Col)>? crossingCellsInRegion = null;
 
-        int fullyContainedSum = 0;
-        List<(int row, int col)>? crossingCellsInUnit = null;
-
-        foreach (var group in cageGroups)
+        foreach (var group in regionCells.GroupBy(cell => cageByCell[cell]))
         {
             var cage = group.Key;
-            var cellsInUnit = group.ToList();
+            var cellsInRegion = group.ToList();
 
-            if (cellsInUnit.Count == cage.Cells.Count)
+            if (cellsInRegion.Count == cage.Cells.Count)
             {
-                fullyContainedSum += cage.TargetSum;
+                containedSum += cage.TargetSum;
                 continue;
             }
 
-            if (crossingCellsInUnit != null)
+            // はみ出しているケージが2つ以上ある帯は扱えない。
+            if (crossingCellsInRegion != null)
                 return null;
 
-            crossingCellsInUnit = cellsInUnit;
+            crossingCellsInRegion = cellsInRegion;
         }
 
-        if (crossingCellsInUnit is null)
+        if (crossingCellsInRegion is null)
             return null;
 
-        int virtualTargetSum = UnitSum - fullyContainedSum;
-        var cells = crossingCellsInUnit.Select(c => (Row: c.row, Col: c.col)).ToList();
+        // 仮想ケージは最大9セルまで（数字の重複禁止が成立する範囲）。
+        if (crossingCellsInRegion.Count > Board.Size)
+            return null;
 
-        return new VirtualCage(cells, virtualTargetSum);
+        return new VirtualCage(
+            crossingCellsInRegion,
+            (UnitSum * unitCount) - containedSum);
     }
 
-    private static IEnumerable<List<(int row, int col)>> EnumerateUnits()
+    /// <summary>
+    /// 幅2以上の帯を列挙する。
+    ///   ・隣接する2行 / 3行
+    ///   ・隣接する2列 / 3列
+    /// 3行・3列の帯はブロック帯（バンド / スタック）と一致するケースを含む。
+    /// </summary>
+    private static IEnumerable<(List<(int Row, int Col)> Cells, int UnitCount)> EnumerateRegions()
     {
-        for (int i = 0; i < Board.Size; i++)
+        for (int width = 2; width <= 3; width++)
         {
-            yield return BoardUnits.Row(i);
-            yield return BoardUnits.Column(i);
-        }
+            for (int start = 0; start + width <= Board.Size; start++)
+            {
+                var rows = new List<(int Row, int Col)>();
 
-        for (int boxRow = 0; boxRow < Board.Size; boxRow += Board.BoxSize)
-            for (int boxCol = 0; boxCol < Board.Size; boxCol += Board.BoxSize)
-                yield return BoardUnits.Box(boxRow, boxCol);
+                for (int r = start; r < start + width; r++)
+                    for (int c = 0; c < Board.Size; c++)
+                        rows.Add((r, c));
+
+                yield return (rows, width);
+
+                var cols = new List<(int Row, int Col)>();
+
+                for (int c = start; c < start + width; c++)
+                    for (int r = 0; r < Board.Size; r++)
+                        cols.Add((r, c));
+
+                yield return (cols, width);
+            }
+        }
     }
 }

@@ -1,7 +1,6 @@
 using Sudoku.Models;
 using Sudoku.Solvers;
 using System.Diagnostics;
-using System.Collections.Concurrent;
 
 namespace Sudoku.Generators;
 
@@ -9,105 +8,144 @@ namespace Sudoku.Generators;
 /// 完成盤面をキラーナンプレの合法なケージへ分割する生成器。
 ///
 /// 重要な方針:
-/// - 「ランダムマージ（Union-Find）」方式を採用。
+/// - 「ランダムマージ（Union-Find）」方式。
 /// - 全81セルを個別ケージとして初期化し、隣接ペアをランダム順に統合していく。
-/// - バックトラック不要。マージできないペアはスキップするだけ。
-/// - デッドロックなし。マージに失敗しても元のケージがそのまま残る。
-/// - O(n) でグリッド全体のパーティションが完了（n は隣接ペア数 ≈ 144）。
+/// - バックトラック不要。マージできないペアはスキップするだけなのでデッドロックしない。
+/// - O(n) でグリッド全体のパーティションが完了（n は隣接ペア数 = 144）。
 /// - 同一数字禁止と連結性は統合段階で常に保証する。
+///
+/// 【ブロック跨ぎバイアス】
+/// 平均ケージサイズを上げるほど盤面は難しくなるが、同時に唯一解になる確率が急落する。
+/// 実測（各300回のパーティションのうち、唯一解になった数）:
+///
+///   平均サイズ | バイアスなし | バイアスあり
+///        2.2  |      69     |     114
+///        2.5  |      38     |      69
+///        2.8  |      22     |      68
+///        3.0  |      10     |      33
+///        3.2  |       3     |      15
+///
+/// 1つのブロック内で閉じたケージは、そのブロックに対する制約をほとんど生まない。
+/// 逆にブロックを跨ぐケージは「45の法則」に効くため、盤面を強く拘束する。
+/// そこで、同一ブロック内で閉じてしまうマージを確率的に見送ることで、
+/// 同じ平均サイズのまま唯一解率を2〜5倍に引き上げている。
+/// 唯一解判定にかかる時間も同時に短くなる（強く拘束されるほど探索が早く終わるため）。
 /// </summary>
-
 public sealed class CageGenerator
 {
     private readonly Random _random;
 
     private const int CellCount = Board.Size * Board.Size; // 81
-    private const int MaxCageSize = 9;
+    private const int EdgeCount = 144;                     // 横72 + 縦72
 
     /// <summary>
     /// 難易度ごとのケージ分割パラメータ。
-    ///   MaxSize    : 1つのケージに含められるセルの上限
-    ///   MinAvg     : ケージの平均サイズ（下限）。これを下回ったら再試行
-    ///   MaxAvg     : ケージの平均サイズ（上限）。これを上回ったら再試行
-    ///   MaxSingles : 単セルケージの上限数
+    ///   MaxSize       : 1つのケージに含められるセルの上限
+    ///   TargetAvg     : 目標平均ケージサイズ（81 / ケージ数）
+    ///   AvgTolerance  : TargetAvg からの許容誤差
+    ///   MaxSingles    : 単セルケージの上限数
+    ///   BoxCrossBias  : 同一ブロック内で閉じるマージを見送る確率（0〜1）
+    ///
+    /// TargetAvg は「その難易度のスコア帯が最も出やすい平均サイズ」を実測して決めている。
+    /// DifficultyScorer のスコア境界と対で調整すること。
     /// </summary>
-    private static readonly Dictionary<
-        Difficulty,
-        (
-            int MaxSize,
-            double MinAvg,
-            double TargetAvg,
-            double MaxAvg,
-            int MaxSingles,
-            int MaxSize5
-        )>
-        DifficultyParams = new()
-        {
-            [Difficulty.Easy] =
-                (
-                    MaxSize: 4,
-                    MinAvg: 1.5,
-                    TargetAvg: 1.8,
-                    MaxAvg: 2.5,
-                    MaxSingles: 20,
-                    MaxSize5: 0
-                ),
-
-            [Difficulty.Normal] =
-                (
-                    MaxSize: 5,
-                    MinAvg: 2.0,
-                    TargetAvg: 2.3,
-                    MaxAvg: 3.0,
-                    MaxSingles: 14,
-                    MaxSize5: 3
-                ),
-
-            [Difficulty.Hard] =
-                (
-                    MaxSize: 5,
-                    MinAvg: 2.4,
-                    TargetAvg: 2.8,
-                    MaxAvg: 3.2,
-                    MaxSingles: 7,
-                    MaxSize5: 4
-                ),
-
-            [Difficulty.Expert] =
-                (
-                    MaxSize: 6,
-                    MinAvg: 2.8,
-                    TargetAvg: 3.4,
-                    MaxAvg: 4.5,
-                    MaxSingles: 4,
-                    MaxSize5: 10
-                ),
-
-            [Difficulty.Master] =
-                (
-                    MaxSize: 7,
-                    MinAvg: 3.1,
-                    TargetAvg: 3.8,
-                    MaxAvg: 5.0,
-                    MaxSingles: 3,
-                    MaxSize5: 14
-                ),
-        };
+    private readonly record struct PartitionParams(
+        int MaxSize,
+        double TargetAvg,
+        double AvgTolerance,
+        int MaxSingles,
+        double BoxCrossBias);
 
     /// <summary>
-    /// CageGenerator 1回の呼び出しで、パーティションの再試行上限。
-    /// Union-Find方式は1回の分割が非常に高速（< 1ms）なので、多くの試行が可能。
+    /// 各難易度のパラメータは、(平均サイズ × バイアス) を振って
+    /// 「その難易度の盤面が1件出るまでの実測時間」が最小になる点を選んでいる
+    /// （シングルスレッド、1セルあたり400回のパーティション）。
+    ///
+    ///   平均 | バイアス | Easy  Normal  Hard  Expert  Master   (1件あたりms)
+    ///   1.8 |   0.70  |   15     -      -      -       -
+    ///   2.2 |   0.85  |   75     65    156      -       -
+    ///   2.4 |   0.85  |  238     95     90    371       -
+    ///   2.6 |   0.85  | 2974    991    248    135     330
+    ///   2.8 |   0.85  |    -   5613    936    468     374
+    ///   3.0 |   0.85  |    -      -  12331   3083    6166
+    ///
+    /// 平均3.0以上は唯一解率が1割を切るうえ、唯一解判定そのものが重くなるため、
+    /// どの難易度にとっても割に合わない。以前の実装が Expert=3.4 / Master=3.8 を
+    /// 狙っていたのは、まさにこの領域であり、生成が事実上成立していなかった。
+    /// 上位難易度は「ケージを大きくする」のではなく
+    /// 「ブロックを跨がせてスコア帯で選別する」ことで作る。
     /// </summary>
-    private const int MaxPartitionAttempts = 300;
+    private static readonly Dictionary<Difficulty, PartitionParams> DifficultyParams = new()
+    {
+        [Difficulty.Easy] = new(
+            MaxSize: 4,
+            TargetAvg: 1.8,
+            AvgTolerance: 0.15,
+            MaxSingles: 26,
+            BoxCrossBias: 0.70),
+
+        [Difficulty.Normal] = new(
+            MaxSize: 5,
+            TargetAvg: 2.2,
+            AvgTolerance: 0.15,
+            MaxSingles: 18,
+            BoxCrossBias: 0.85),
+
+        [Difficulty.Hard] = new(
+            MaxSize: 5,
+            TargetAvg: 2.4,
+            AvgTolerance: 0.15,
+            MaxSingles: 14,
+            BoxCrossBias: 0.85),
+
+        [Difficulty.Expert] = new(
+            MaxSize: 5,
+            TargetAvg: 2.6,
+            AvgTolerance: 0.15,
+            MaxSingles: 11,
+            BoxCrossBias: 0.85),
+
+        [Difficulty.Master] = new(
+            MaxSize: 5,
+            TargetAvg: 2.8,
+            AvgTolerance: 0.15,
+            MaxSingles: 9,
+            BoxCrossBias: 0.85),
+    };
 
     /// <summary>
-    /// 全隣接ペア（辺を共有するセルの組み合わせ）を事前計算して保持。
+    /// CageGenerator 1回の呼び出しでのパーティション再試行上限。
+    /// 1回の分割が 0.1ms 程度なので、多くの試行を許容できる。
     /// </summary>
+    private const int MaxPartitionAttempts = 200;
+
+    /// <summary>マージの試行パス数。1パスで全144辺をランダム順に1回ずつ検討する。</summary>
+    private const int MaxMergePasses = 12;
+
+    /// <summary>単セル解消専用パスの上限。</summary>
+    private const int MaxSingleCleanupPasses = 8;
+
+    /// <summary>全隣接ペア（辺を共有するセルの組み合わせ）を事前計算して保持。</summary>
     private static readonly (int A, int B)[] AllEdges = BuildAllEdges();
+
+    /// <summary>各セルが属するブロックのビット。ブロック跨ぎ判定に使う。</summary>
+    private static readonly int[] BoxBit = BuildBoxBits();
+
+    // Union-Find の作業配列。
+    // GenerateCages は1インスタンスにつき単一スレッドからしか呼ばれない
+    // （各ワーカーが自分の CageGenerator を持つ）ため、毎回 new せず使い回す。
+    private readonly int[] _parent = new int[CellCount];
+    private readonly int[] _size = new int[CellCount];
+    private readonly int[] _digitMask = new int[CellCount];
+    private readonly int[] _boxMask = new int[CellCount];
+    private readonly int[] _edgeOrder = new int[EdgeCount];
 
     public CageGenerator(Random? random = null)
     {
         _random = random ?? new Random();
+
+        for (int i = 0; i < _edgeOrder.Length; i++)
+            _edgeOrder[i] = i;
     }
 
     public List<Cage>? GenerateCages(
@@ -118,12 +156,10 @@ public sealed class CageGenerator
     {
         ArgumentNullException.ThrowIfNull(solvedBoard);
 
-        var digits = ReadDigits(solvedBoard);
-        ValidateDigits(digits);
-
         if (budgetMs <= 0)
             throw new ArgumentOutOfRangeException(nameof(budgetMs));
 
+        var digits = ReadDigits(solvedBoard);
         var param = DifficultyParams[difficulty];
         var stopwatch = Stopwatch.StartNew();
 
@@ -136,15 +172,7 @@ public sealed class CageGenerator
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            var cageIndices = TryRandomMergePartition(
-                digits,
-                difficulty,
-                param.MaxSize,
-                param.MinAvg,
-                param.TargetAvg,
-                param.MaxAvg,
-                param.MaxSingles,
-                param.MaxSize5);
+            var cageIndices = TryRandomMergePartition(digits, param);
 
             if (cageIndices is null)
                 continue;
@@ -161,304 +189,77 @@ public sealed class CageGenerator
     // ランダムマージ（Union-Find）方式
     // ================================================================
 
-    // ================================================================
-    // ケージの「曖昧さ」（数字の組み合わせ数）に基づく、マージ優先度の算出
-    //
-    // あるサイズ・合計値のケージについて、1〜9から相異なる数字を選んで
-    // 合計を満たす組み合わせが何通りあるかを数える。
-    //   組み合わせが少ない → そのケージ単体でも数字を絞り込みやすい（易しい）
-    //   組み合わせが多い   → 他のケージ・ユニットと照合しないと絞り込めない（難しい）
-    //
-    // CageGeneratorはケージの形（どのマスをまとめるか）だけを選んでおり、
-    // 数字自体は既に確定した完成盤面から決まるため、動かせるのは
-    // 「どのマスをまとめるか」だけである。そこで、マージ候補ごとに
-    // 生成される（サイズ, 合計）の組み合わせ数を見て、要求難易度に
-    // ふさわしいケージほど優先的に採用する。
-    // ================================================================
-
-    private static readonly ConcurrentDictionary<(int Size, int Sum), int> ComboCountCache = new();
-    private static readonly ConcurrentDictionary<int, int> MaxComboCountCache = new();
-
-    /// <summary>1〜9からsize個の相異なる数字を選び合計がsumになる組み合わせ数（キャッシュ付き）。</summary>
-    private static int GetComboCount(int size, int sum)
-    {
-        return ComboCountCache.GetOrAdd((size, sum), key =>
-        {
-            int count = 0;
-            CountCombosRecursive(1, key.Size, key.Sum, ref count);
-            return count;
-        });
-    }
-
-    private static void CountCombosRecursive(int start, int remainingSize, int remainingSum, ref int count)
-    {
-        if (remainingSize == 0)
-        {
-            if (remainingSum == 0)
-                count++;
-            return;
-        }
-
-        for (int d = start; d <= 9; d++)
-        {
-            if (d > remainingSum) break;
-            CountCombosRecursive(d + 1, remainingSize - 1, remainingSum - d, ref count);
-        }
-    }
-
-    /// <summary>指定サイズのケージが取りうる組み合わせ数の理論上の最大値（合計値を動かして探索）。</summary>
-    private static int GetMaxComboCountForSize(int size)
-    {
-        return MaxComboCountCache.GetOrAdd(size, sz =>
-        {
-            int minSum = sz * (sz + 1) / 2;
-
-            int maxSum = 0;
-            for (int i = 0; i < sz; i++)
-                maxSum += 9 - i;
-
-            int best = 0;
-            for (int s = minSum; s <= maxSum; s++)
-                best = Math.Max(best, GetComboCount(sz, s));
-
-            return Math.Max(best, 1);
-        });
-    }
-
-    /// <summary>数字マスクに含まれる数字の合計値を返す。</summary>
-    private static int SumOfDigitMask(int mask)
-    {
-        int sum = 0;
-        for (int d = 1; d <= 9; d++)
-            if ((mask & (1 << (d - 1))) != 0)
-                sum += d;
-        return sum;
-    }
-
     /// <summary>
-    /// このマージで生成されるケージ（サイズ, 合計）が、要求難易度にとって
-    /// 好ましい「曖昧さ」であるほど1に近い値を返す（0〜1）。
-    /// Easy/Normal: 組み合わせが少ない（絞り込みやすい）ケージを優先。
-    /// Hard/Expert/Master: 組み合わせが多い（複数ケージをまたぐ推理が必要な）ケージを優先。
-    /// </summary>
-    private static double GetMergePreferenceScore(Difficulty difficulty, int size, int sum)
-    {
-        if (size < 2)
-            return 1.0;
-
-        int maxCombos = GetMaxComboCountForSize(size);
-        if (maxCombos <= 1)
-            return 1.0;
-
-        double ambiguityRatio = (double)GetComboCount(size, sum) / maxCombos;
-
-        return difficulty switch
-        {
-            Difficulty.Easy => 1.0 - ambiguityRatio,
-            Difficulty.Normal => 1.0 - (ambiguityRatio * 0.6),
-            Difficulty.Hard => 0.4 + (ambiguityRatio * 0.6),
-            Difficulty.Expert => 0.2 + (ambiguityRatio * 0.8),
-            Difficulty.Master => ambiguityRatio,
-            _ => 1.0,
-        };
-    }
-
-    /// <summary>
-    /// 全81セルを個別ケージとして初期化し、
-    /// 隣接ペアをランダム順に統合していくことでケージを構築する。
+    /// 全81セルを個別ケージとして初期化し、隣接ペアをランダム順に統合していく。
     ///
     /// 統合の条件:
     ///   1. 統合後のサイズが MaxSize 以下
     ///   2. 統合後のケージ内に同じ数字が存在しない
+    ///   3. 同一ブロック内で閉じるマージは BoxCrossBias の確率で見送る
     ///
-    /// 統合中に難易度ごとの目標平均サイズへ近づける。
-    /// 単セルを含む統合を優先し、終盤では小さいケージ同士を優先して
-    /// サイズ上限による行き詰まりを抑える。
-    ///
-    /// 最終的に平均サイズ・単セル数・目標平均サイズを検証し、
-    /// 条件を満たさなければ null を返して再試行させる。
+    /// 最終的に平均サイズと単セル数を検証し、条件を満たさなければ
+    /// null を返して呼び出し側に再試行させる。
     /// </summary>
     private List<List<int>>? TryRandomMergePartition(
         int[] digits,
-        Difficulty difficulty,
-        int maxSize,
-        double minAvg,
-        double targetAvg,
-        double maxAvg,
-        int maxSingles,
-        int maxSize5)
+        PartitionParams param)
     {
-        // ----- Union-Find 初期化 -----
-        var parent = new int[CellCount];
-        var rank = new int[CellCount];
-        var size = new int[CellCount];
-        var digitMask = new int[CellCount];
-
         for (int i = 0; i < CellCount; i++)
         {
-            parent[i] = i;
-            rank[i] = 0;
-            size[i] = 1;
-            digitMask[i] = 1 << (digits[i] - 1);
+            _parent[i] = i;
+            _size[i] = 1;
+            _digitMask[i] = 1 << (digits[i] - 1);
+            _boxMask[i] = BoxBit[i];
         }
 
         int cageCount = CellCount;
 
-        // ------------------------------------------------------------
-        // 目標:
-        //   平均サイズを TargetAvg 付近まで上げる。
-        //
-        // 81セルなので、
-        //   average = 81 / cageCount
-        //
-        // TargetAvg = 3.1 なら、
-        //   81 / 3.1 ≒ 26.1
-        //
-        // したがって、およそ26ケージを目標にする。
-        // ------------------------------------------------------------
+        // 81セルなので average = 81 / cageCount。
+        // TargetAvg = 2.8 なら 81 / 2.8 ≒ 29 ケージを目標にする。
         int targetCageCount =
             Math.Max(
                 1,
                 (int)Math.Round(
-                    CellCount / targetAvg,
+                    CellCount / param.TargetAvg,
                     MidpointRounding.AwayFromZero));
 
         // ------------------------------------------------------------
-        // 同じ辺だけで一度しか試さないと、
-        // ランダム順序によってはマージ可能な辺を取り逃がす。
-        //
-        // そこで、目標に届くまで最大8パスする。
-        // 144辺 × 8パスでも十分小さい。
+        // メインのマージパス。
+        // 1回のランダム順では統合可能な辺を取り逃がすため、
+        // 目標ケージ数に届くまで複数パス回す。
         // ------------------------------------------------------------
-        const int MaxMergePasses = 12;
-
-        for (int pass = 0; pass < MaxMergePasses; pass++)
+        for (int pass = 0; pass < MaxMergePasses && cageCount > targetCageCount; pass++)
         {
-            if (cageCount <= targetCageCount)
-                break;
-
-            var edgeIndices =
-                ShuffledEdgeIndices();
+            ShuffleEdgeOrder();
 
             bool mergedThisPass = false;
 
-            foreach (int edgeIdx in edgeIndices)
+            foreach (int edgeIdx in _edgeOrder)
             {
                 if (cageCount <= targetCageCount)
                     break;
 
                 var (a, b) = AllEdges[edgeIdx];
 
-                int rootA = Find(parent, a);
-                int rootB = Find(parent, b);
+                int rootA = Find(a);
+                int rootB = Find(b);
 
-                if (rootA == rootB)
+                if (!CanMerge(rootA, rootB, param.MaxSize))
                     continue;
 
-                int newSize =
-                    size[rootA] +
-                    size[rootB];
-
-                if (newSize > maxSize)
-                    continue;
-
-                if ((digitMask[rootA] & digitMask[rootB]) != 0)
-                    continue;
-
-                if (newSize == 5)
-                {
-                    int currentSize5Count =
-                        CountCagesOfSize(
-                            parent,
-                            size,
-                            5);
-
-                    if (currentSize5Count >= maxSize5)
-                        continue;
-                }
-
-                // --------------------------------------------------------
-                // 単セルを優先的に減らす。
-                //
-                // どちらかが単セルなら、そのマージを優先する。
-                // 現在のforeach順自体がランダムなので、
-                // 「単セルを含む辺」を見つけた場合は即マージする。
-                // --------------------------------------------------------
-                // --------------------------------------------------------
-                // 単セルを優先的に減らす。
-                //
-                // どちらかが単セルなら、そのマージを優先する。
-                // 現在のforeach順自体がランダムなので、
-                // 「単セルを含む辺」を見つけた場合は即マージする。
-                // --------------------------------------------------------
+                // 単セルを含むマージは最優先で通す。
+                // 単セルは実質的な「ヒント」なので、残すほど難易度が上がらない。
                 bool hasSingle =
-                    size[rootA] == 1 ||
-                    size[rootB] == 1;
+                    _size[rootA] == 1 ||
+                    _size[rootB] == 1;
 
-                if (hasSingle)
-                {
-                    Union(
-                        parent,
-                        rank,
-                        size,
-                        digitMask,
-                        rootA,
-                        rootB);
-
-                    cageCount--;
-                    mergedThisPass = true;
-                    continue;
-                }
-
-                // --------------------------------------------------------
-                // すでに単セルが少なくなった後は、
-                // 小さなケージ同士を優先して統合する。
-                //
-                // 大きなケージを先に作りすぎると、
-                // 終盤でサイズ上限に引っ掛かりやすくなる。
-                // --------------------------------------------------------
-                if (newSize >= 5 &&
-                    cageCount > targetCageCount + 2)
+                if (!hasSingle &&
+                    ShouldSkipForBoxBias(rootA, rootB, param.BoxCrossBias))
                 {
                     continue;
                 }
 
-                if (newSize == 5)
-                {
-                    int currentSize5Count = CountCagesOfSize(
-                        parent,
-                        size,
-                        5);
-
-                    if (currentSize5Count >= maxSize5)
-                        continue;
-                }
-
-                // --------------------------------------------------------
-                // 難易度に応じたケージの「曖昧さ」の優先度を考慮する。
-                // ここで採用されなかった辺は、次のパス以降で再シャッフル
-                // された順序で改めて検討されるため、統合自体が止まる
-                // ことはない。
-                // --------------------------------------------------------
-                int mergedDigitMask =
-                    digitMask[rootA] | digitMask[rootB];
-
-                double mergePreference =
-                    GetMergePreferenceScore(
-                        difficulty,
-                        newSize,
-                        SumOfDigitMask(mergedDigitMask));
-
-                if (_random.NextDouble() > mergePreference)
-                    continue;
-
-                Union(
-                    parent,
-                    rank,
-                    size,
-                    digitMask,
-                    rootA,
-                    rootB);
+                Union(rootA, rootB);
 
                 cageCount--;
                 mergedThisPass = true;
@@ -471,89 +272,42 @@ public sealed class CageGenerator
         // ------------------------------------------------------------
         // 単セル解消専用パス。
         //
-        // 上のメインループは cageCount <= targetCageCount に達した時点で
-        // 即座に打ち切られるため、目標ケージ数へ到達していても
-        // 単セルが大量に残存するケースがある。この状態は下のValidateAndExtract
-        // の singles 上限チェックで必ず弾かれ、再試行を無駄に繰り返す原因になる。
-        //
-        // そこで、目標ケージ数への到達可否とは無関係に、
-        // 残っている単セルを maxSingles を満たすまで追加でマージする。
+        // メインループは cageCount <= targetCageCount に達した時点で
+        // 打ち切られるため、目標ケージ数へ到達していても単セルが
+        // 大量に残ることがある。その状態は下の検証で必ず弾かれ、
+        // 再試行を無駄に繰り返す原因になるので、
+        // 目標ケージ数とは無関係に、残った単セルを追加でマージする。
         // ------------------------------------------------------------
-        const int MaxSingleCleanupPasses = 16;
-
-        for (int cleanupPass = 0; cleanupPass < MaxSingleCleanupPasses; cleanupPass++)
+        for (int pass = 0; pass < MaxSingleCleanupPasses; pass++)
         {
-            if (CountSingles(parent, size) <= maxSingles)
+            if (CountSingles() <= param.MaxSingles)
                 break;
 
-            var edgeIndices = ShuffledEdgeIndices();
+            ShuffleEdgeOrder();
+
             bool mergedThisPass = false;
 
-            foreach (int edgeIdx in edgeIndices)
+            foreach (int edgeIdx in _edgeOrder)
             {
                 var (a, b) = AllEdges[edgeIdx];
 
-                int rootA = Find(parent, a);
-                int rootB = Find(parent, b);
+                int rootA = Find(a);
+                int rootB = Find(b);
 
-                if (rootA == rootB)
+                if (!CanMerge(rootA, rootB, param.MaxSize))
                     continue;
 
-                bool aSingle =
-                    size[rootA] == 1;
-
-                bool bSingle =
-                    size[rootB] == 1;
-
-                int newSize =
-                    size[rootA] + size[rootB];
-
-                if (newSize > maxSize)
+                // 単セルを含まないマージはここでは行わない。
+                // 平均サイズを目標から押し上げてしまうため。
+                if (_size[rootA] != 1 && _size[rootB] != 1)
                     continue;
 
-                if ((digitMask[rootA] & digitMask[rootB]) != 0)
-                    continue;
-
-                // 単セルを含む結合を最優先する。
-                if (aSingle || bSingle)
-                {
-                    Union(
-                        parent,
-                        rank,
-                        size,
-                        digitMask,
-                        rootA,
-                        rootB);
-
-                    cageCount--;
-                    mergedThisPass = true;
-
-                    if (CountSingles(parent, size) <= maxSingles)
-                        break;
-
-                    continue;
-                }
-
-                // 単セルを含まないケージ同士は、
-                // 小さいケージ同士のみ追加結合する。
-                if (newSize > 3)
-                    continue;
-
-                Union(
-                    parent,
-                    rank,
-                    size,
-                    digitMask,
-                    rootA,
-                    rootB);
+                Union(rootA, rootB);
 
                 cageCount--;
                 mergedThisPass = true;
 
-                if (CountSingles(parent, size) <= maxSingles)
-                    break;
-
-                if (CountSingles(parent, size) <= maxSingles)
+                if (CountSingles() <= param.MaxSingles)
                     break;
             }
 
@@ -562,195 +316,133 @@ public sealed class CageGenerator
         }
 
         // ------------------------------------------------------------
-        // 最終結果を抽出
+        // 検証して抽出
         // ------------------------------------------------------------
-        var cages =
-            ValidateAndExtract(
-                parent,
-                size,
-                maxSingles,
-                minAvg,
-                maxAvg);
+        double avgSize = (double)CellCount / cageCount;
 
-        if (cages is null)
+        if (Math.Abs(avgSize - param.TargetAvg) > param.AvgTolerance)
             return null;
 
-        double avgSize =
-            (double)CellCount / cages.Count;
-
-        int singles =
-            cages.Count(c => c.Count == 1);
-
-        int size5Count =
-            cages.Count(c => c.Count == 5);
-
-        const double TargetTolerance = 0.3;
-
-        if (Math.Abs(avgSize - targetAvg) > TargetTolerance)
+        if (CountSingles() > param.MaxSingles)
             return null;
 
-        if (singles > maxSingles)
-            return null;
+        return ExtractCages();
+    }
 
-        if (size5Count > maxSize5)
-            return null;
+    /// <summary>ケージ2つを統合できるか（別ケージ・サイズ上限・数字重複）。</summary>
+    private bool CanMerge(int rootA, int rootB, int maxSize)
+    {
+        if (rootA == rootB)
+            return false;
 
-        // 直前の2条件を通過している以上、この時点でAvgSize・Singlesは
-        // 必ず許容範囲内のはず。生成ログの実測値がこの前提と食い違う場合、
-        // 呼び出し元でparamの取り違えや競合が起きている可能性があるため、
-        // デバッグビルドで即座に検知できるようにしておく。
-        System.Diagnostics.Debug.Assert(
-            Math.Abs(avgSize - targetAvg) <= TargetTolerance,
-            $"AvgSize({avgSize:F2})がTargetAvg({targetAvg:F2})±{TargetTolerance}の範囲外です。");
-        System.Diagnostics.Debug.Assert(
-            singles <= maxSingles,
-            $"Singles({singles})がMaxSingles({maxSingles})を超えています。");
+        if (_size[rootA] + _size[rootB] > maxSize)
+            return false;
 
-        return cages;
+        return (_digitMask[rootA] & _digitMask[rootB]) == 0;
     }
 
     /// <summary>
-    /// Union-Find: Find（経路圧縮付き）
+    /// 同一ブロック内で閉じたままになるマージを、BoxCrossBias の確率で見送る。
+    /// ブロックを跨ぐケージは「45の法則」に効くため盤面を強く拘束し、
+    /// 同じ平均サイズでも唯一解になりやすくなる。
     /// </summary>
-    private static int Find(int[] parent, int x)
+    private bool ShouldSkipForBoxBias(int rootA, int rootB, double boxCrossBias)
     {
-        while (parent[x] != x)
+        if (boxCrossBias <= 0)
+            return false;
+
+        bool staysInsideOneBox =
+            _boxMask[rootA] == _boxMask[rootB] &&
+            IsSingleBit(_boxMask[rootA]);
+
+        if (!staysInsideOneBox)
+            return false;
+
+        return _random.NextDouble() < boxCrossBias;
+    }
+
+    /// <summary>Union-Find: Find（経路圧縮付き）</summary>
+    private int Find(int x)
+    {
+        while (_parent[x] != x)
         {
-            parent[x] = parent[parent[x]]; // 経路圧縮
-            x = parent[x];
+            _parent[x] = _parent[_parent[x]];
+            x = _parent[x];
         }
+
         return x;
     }
 
     /// <summary>
-    /// Union-Find: Union（ランクによる統合 + サイズ・数字マスクの伝播）
+    /// Union-Find: Union。
+    /// サイズの大きい方を親にすることで木の深さを抑えつつ、
+    /// サイズ・数字マスク・ブロックマスクを親へ集約する。
     /// </summary>
-    private static void Union(
-        int[] parent,
-        int[] rank,
-        int[] size,
-        int[] digitMask,
-        int rootA,
-        int rootB)
+    private void Union(int rootA, int rootB)
     {
-        if (rank[rootA] < rank[rootB])
+        if (_size[rootA] < _size[rootB])
             (rootA, rootB) = (rootB, rootA);
 
-        parent[rootB] = rootA;
-        size[rootA] += size[rootB];
-        digitMask[rootA] |= digitMask[rootB];
-
-        if (rank[rootA] == rank[rootB])
-            rank[rootA]++;
+        _parent[rootB] = rootA;
+        _size[rootA] += _size[rootB];
+        _digitMask[rootA] |= _digitMask[rootB];
+        _boxMask[rootA] |= _boxMask[rootB];
     }
 
-    /// <summary>
-    /// 現在のUnion-Find状態における単セルケージ（サイズ1のケージ）の数を数える。
-    /// </summary>
-    private static int CountSingles(int[] parent, int[] size)
+    /// <summary>現在の単セルケージ（サイズ1）の数。</summary>
+    private int CountSingles()
     {
         int count = 0;
-        var seenRoots = new HashSet<int>();
 
         for (int i = 0; i < CellCount; i++)
         {
-            int root = Find(parent, i);
-            if (seenRoots.Add(root) && size[root] == 1)
+            // 各ケージの代表元（root）でだけ数える。
+            if (_parent[i] == i && _size[i] == 1)
                 count++;
         }
 
         return count;
     }
 
-    private static int CountCagesOfSize(
-    int[] parent,
-    int[] size,
-    int targetSize)
+    /// <summary>Union-Find の結果から、ケージごとのセル一覧を組み立てる。</summary>
+    private List<List<int>> ExtractCages()
     {
-        int count = 0;
-        var seenRoots = new HashSet<int>();
+        var cageByRoot = new Dictionary<int, List<int>>();
 
         for (int i = 0; i < CellCount; i++)
         {
-            int root = Find(parent, i);
+            int root = Find(i);
 
-            if (!seenRoots.Add(root))
-                continue;
-
-            if (size[root] == targetSize)
-                count++;
-        }
-
-        return count;
-    }
-
-    /// <summary>
-    /// Union-Find の結果からケージリストを抽出し、構造を検証する。
-    /// 基準を満たさなければ null を返す。
-    /// </summary>
-    private static List<List<int>>? ValidateAndExtract(
-        int[] parent,
-        int[] size,
-        int maxSingles,
-        double minAvg,
-        double maxAvg)
-    {
-        // ケージごとにセルを集める
-        var cageMap = new Dictionary<int, List<int>>();
-
-        for (int i = 0; i < CellCount; i++)
-        {
-            int root = Find(parent, i);
-
-            if (!cageMap.TryGetValue(root, out var list))
+            if (!cageByRoot.TryGetValue(root, out var list))
             {
                 list = new List<int>();
-                cageMap[root] = list;
+                cageByRoot[root] = list;
             }
 
             list.Add(i);
         }
 
-        var cages = cageMap.Values.ToList();
-
-        // ----- 構造チェック -----
-        int singles = cages.Count(c => c.Count == 1);
-
-        if (singles > maxSingles)
-            return null;
-
-        double avgSize = (double)CellCount / cages.Count;
-
-        if (avgSize < minAvg || avgSize > maxAvg)
-            return null;
-
-        return cages;
+        return cageByRoot.Values.ToList();
     }
 
-    /// <summary>
-    /// 辺のインデックス配列をシャッフルして返す。
-    /// 毎回配列を新規作成してシャッフルする（Union-Find 方式では辺の順序がケージ構造を決定する）。
-    /// </summary>
-    private int[] ShuffledEdgeIndices()
+    /// <summary>辺の並びをその場でシャッフルする（Fisher-Yates）。</summary>
+    private void ShuffleEdgeOrder()
     {
-        var indices = new int[AllEdges.Length];
-        for (int i = 0; i < indices.Length; i++)
-            indices[i] = i;
-
-        for (int i = indices.Length - 1; i > 0; i--)
+        for (int i = _edgeOrder.Length - 1; i > 0; i--)
         {
             int j = _random.Next(i + 1);
-            (indices[i], indices[j]) = (indices[j], indices[i]);
+            (_edgeOrder[i], _edgeOrder[j]) = (_edgeOrder[j], _edgeOrder[i]);
         }
-
-        return indices;
     }
 
     // ================================================================
     // ヘルパー
     // ================================================================
 
-    private int[] ReadDigits(Board solvedBoard)
+    private static bool IsSingleBit(int mask)
+        => mask != 0 && (mask & (mask - 1)) == 0;
+
+    private static int[] ReadDigits(Board solvedBoard)
     {
         var digits = new int[CellCount];
 
@@ -759,8 +451,13 @@ public sealed class CageGenerator
             for (int col = 0; col < Board.Size; col++)
             {
                 var value = solvedBoard.GetCell(row, col).Value;
+
                 if (!value.HasValue)
                     throw new InvalidOperationException("完成盤面に空セルがあります。");
+
+                if (value.Value < 1 || value.Value > Board.Size)
+                    throw new InvalidOperationException(
+                        $"完成盤面のセル({row},{col})の数字が不正です: {value.Value}");
 
                 digits[ToIndex(row, col)] = value.Value;
             }
@@ -769,26 +466,21 @@ public sealed class CageGenerator
         return digits;
     }
 
-    private static void ValidateDigits(int[] digits)
-    {
-        if (digits.Length != CellCount)
-            throw new InvalidOperationException("盤面サイズが不正です。");
-
-        for (int i = 0; i < digits.Length; i++)
-        {
-            if (digits[i] < 1 || digits[i] > Board.Size)
-                throw new InvalidOperationException($"セル {i} の数字が不正です: {digits[i]}");
-        }
-    }
-
     private static List<Cage> CreateCages(List<List<int>> cageIndexes, int[] digits)
     {
         var cages = new List<Cage>(cageIndexes.Count);
 
         foreach (var indexes in cageIndexes)
         {
-            int sum = indexes.Sum(i => digits[i]);
-            var cells = indexes.Select(FromIndex).ToList();
+            int sum = 0;
+            var cells = new List<(int Row, int Col)>(indexes.Count);
+
+            foreach (int index in indexes)
+            {
+                sum += digits[index];
+                cells.Add(FromIndex(index));
+            }
+
             cages.Add(new Cage(cells, sum));
         }
 
@@ -807,7 +499,7 @@ public sealed class CageGenerator
     /// </summary>
     private static (int A, int B)[] BuildAllEdges()
     {
-        var edges = new List<(int, int)>();
+        var edges = new List<(int, int)>(EdgeCount);
 
         for (int row = 0; row < Board.Size; row++)
         {
@@ -815,17 +507,34 @@ public sealed class CageGenerator
             {
                 int index = ToIndex(row, col);
 
-                // 右隣
                 if (col < Board.Size - 1)
                     edges.Add((index, ToIndex(row, col + 1)));
 
-                // 下隣
                 if (row < Board.Size - 1)
                     edges.Add((index, ToIndex(row + 1, col)));
             }
         }
 
         return edges.ToArray();
+    }
+
+    private static int[] BuildBoxBits()
+    {
+        var bits = new int[CellCount];
+
+        for (int row = 0; row < Board.Size; row++)
+        {
+            for (int col = 0; col < Board.Size; col++)
+            {
+                int box =
+                    (row / Board.BoxSize) * Board.BoxSize +
+                    (col / Board.BoxSize);
+
+                bits[ToIndex(row, col)] = 1 << box;
+            }
+        }
+
+        return bits;
     }
 
     private static void WriteDebugInfo(List<Cage> cages)
@@ -839,19 +548,11 @@ public sealed class CageGenerator
                 .OrderBy(g => g.Key)
                 .Select(g => $"Size{g.Key}={g.Count()}");
 
-        double averageSize =
-            cages.Count == 0
-                ? 0
-                : cages.Average(c => c.Cells.Count);
-
-        int singleCount =
-            cages.Count(c => c.Cells.Count == 1);
-
-        System.Diagnostics.Debug.WriteLine(
+        Debug.WriteLine(
             "[CageGenerator] " +
             string.Join(", ", sizeCounts) +
             $", CageCount={cages.Count}" +
-            $", AvgSize={averageSize:F2}" +
-            $", Singles={singleCount}");
+            $", AvgSize={(double)CellCount / cages.Count:F2}" +
+            $", Singles={cages.Count(c => c.Cells.Count == 1)}");
     }
 }

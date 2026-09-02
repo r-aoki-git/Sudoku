@@ -242,17 +242,26 @@ public static class ParallelKillerSudokuGenerator
             $"{overallTimeoutMs}ms 以内に成功しませんでした。");
     }
 
+    // ------------------------------------------------------------
+    // 難易度ごとの最低予算。
+    //
+    // シングルスレッドで1件生成するのにかかる実測時間（中央値）は
+    //   Easy 25ms / Normal 87ms / Hard 92ms / Expert 244ms / Master 802ms。
+    // ワーカーを並列に走らせるので実際の待ち時間はこれより短くなるが、
+    // 分布の裾（たまたま当たりを引けない試行）を吸収できるだけの
+    // 余裕を持たせた値にしている。
+    // ------------------------------------------------------------
     private static int GetMinimumPerAttemptBudget(
         Difficulty difficulty)
     {
         return difficulty switch
         {
-            Difficulty.Easy => 1200,
-            Difficulty.Normal => 1800,
-            Difficulty.Hard => 2500,
-            Difficulty.Expert => 9000,
-            Difficulty.Master => 10000,
-            _ => 2500
+            Difficulty.Easy => 800,
+            Difficulty.Normal => 1200,
+            Difficulty.Hard => 1500,
+            Difficulty.Expert => 2500,
+            Difficulty.Master => 4000,
+            _ => 1500
         };
     }
 
@@ -261,12 +270,12 @@ public static class ParallelKillerSudokuGenerator
     {
         return difficulty switch
         {
-            Difficulty.Easy => 5000,
-            Difficulty.Normal => 7500,
-            Difficulty.Hard => 10000,
-            Difficulty.Expert => 30000,
-            Difficulty.Master => 30000,
-            _ => 10000
+            Difficulty.Easy => 4000,
+            Difficulty.Normal => 5000,
+            Difficulty.Hard => 6000,
+            Difficulty.Expert => 8000,
+            Difficulty.Master => 12000,
+            _ => 6000
         };
     }
 

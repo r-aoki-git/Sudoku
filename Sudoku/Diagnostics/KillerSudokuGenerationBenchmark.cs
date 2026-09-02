@@ -150,6 +150,12 @@ public static class KillerSudokuGenerationBenchmark
 
                 if (!cagesValid)
                     hardFailureCount++;
+
+                // 人間解法で解けない盤面を出してしまった場合、
+                // プレイヤーがアプリ内の解法で最後まで到達できない。
+                // 難易度のズレではなく生成器の不具合として数える。
+                if (fallback)
+                    hardFailureCount++;
             }
             catch (Exception ex)
             {
@@ -371,30 +377,33 @@ public static class KillerSudokuGenerationBenchmark
             timeBudgetMs: 5000);
     }
 
+    /// <summary>
+    /// 生成された盤面の実際の難易度を測る。
+    ///
+    /// targetDifficultyは渡さない。目標難易度を渡すと途中で枝刈りされてしまい、
+    /// 「本当は何点の盤面だったか」を測れなくなるため。
+    ///
+    /// fallback = true は「人間解法だけでは解けなかった」ことを意味する。
+    /// 生成器は人間解法で解けることを採用条件にしているので、
+    /// ここでtrueが出た場合は難易度のズレではなく生成器の不具合である。
+    /// </summary>
     private static Difficulty DetermineActualDifficulty(
         List<Cage> cages,
         out bool fallback)
     {
-        var solver =
-            new KillerHumanSolver(
-                cages);
-
         var result =
-            solver.Solve(
-                new Board(),
-                timeBudgetMs: 5000,
-                targetDifficulty: Difficulty.Master);
+            new KillerHumanSolver(cages)
+                .Solve(
+                    new Board(),
+                    timeBudgetMs: 5000,
+                    targetDifficulty: null);
 
         fallback =
             result.RequiredFallback;
 
-        var scorer =
-            new DifficultyScorer();
-
-        var difficulty =
-            scorer.Evaluate(result);
-
-        return difficulty.Label;
+        return new DifficultyScorer()
+            .Evaluate(result)
+            .Label;
     }
 
     private static double CalculateMedian(
