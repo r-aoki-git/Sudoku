@@ -79,6 +79,22 @@ public class KillerBacktrackingSolver
 
     private readonly List<CandidateChange> _candidateTrail = new();
 
+    // ------------------------------------------------------------
+    // ApplyCageConstraints() 用の再利用バッファ。
+    //
+    // Expert / Master の探索では制約伝播が大量に呼ばれるため、
+    // 毎回 List / Dictionary / int[] を new するとGC負荷が増える。
+    // 各ケージは最大9セルなので、盤面サイズ固定のバッファを再利用する。
+    // ------------------------------------------------------------
+    private readonly (int Row, int Col)[] _emptyCellBuffer =
+        new (int Row, int Col)[Board.Size];
+
+    private readonly int[] _allowedPerCellBuffer =
+        new int[Board.Size];
+
+    private readonly int[] _comboAllowedBuffer =
+        new int[Board.Size];
+
     private void SetGridValue(int row, int col, int value)
     {
         if (_grid[row, col] == value)
@@ -409,8 +425,12 @@ public class KillerBacktrackingSolver
         // ------------------------------------------------------------
         if (IsDifferentFromKnownSolution())
         {
+            // 現在状態は既知解とは異なることが確定している。
+            //
+            // ここからは「既知解かどうか」を考える必要がない。
+            // 制約伝播済み状態から、通常の解探索だけを行う。
             bool solved =
-                SolveOne();
+                SearchAnySolution();
 
             if (solved)
                 return true;
@@ -490,8 +510,16 @@ public class KillerBacktrackingSolver
                 col,
                 knownDigit);
 
-            if (SearchForAlternativeSolution())
-                return true;
+            // knownDigitを配置したことで候補状態が変化したため、
+            // この分岐で必要な制約伝播を1回だけ実行する。
+            if (Propagate())
+            {
+                if (SearchForAlternativeSolution(
+                        propagated: true))
+                {
+                    return true;
+                }
+            }
 
             Restore(knownBranchCheckpoint);
         }
@@ -580,11 +608,14 @@ public class KillerBacktrackingSolver
         return count;
     }
 
-    // ====== 唯一解の探索（見つけたらそこで終了） ======
-    private bool SolveOne()
+    // ================================================================
+    // 既に制約伝播済みの状態から解を1つ探す。
+    // SolveOne() と違い、開始時に Propagate() を実行しない。
+    // ================================================================
+    private bool SearchAnySolution()
     {
-        if (_stopwatch is null)
-            throw new InvalidOperationException("Stopwatch is not initialized.");
+        if (_aborted)
+            return false;
 
         if (TimeIsUp())
         {
@@ -592,13 +623,66 @@ public class KillerBacktrackingSolver
             return false;
         }
 
-        if (_cancellationToken.IsCancellationRequested)
+        var target =
+            FindMrvCell();
+
+        // 全セル確定
+        if (target is null)
+            return true;
+
+        var (row, col, mask) =
+            target.Value;
+
+        foreach (int digit in IterateDigits(mask))
+        {
+            if (_aborted)
+                return false;
+
+            if (TimeIsUp())
+            {
+                _aborted = true;
+                return false;
+            }
+
+            var checkpoint =
+                CreateCheckpoint();
+
+            SetGridValue(
+                row,
+                col,
+                digit);
+
+            if (Propagate())
+            {
+                if (SearchAnySolution())
+                    return true;
+            }
+
+            Restore(checkpoint);
+        }
+
+        return false;
+    }
+
+    // ================================================================
+    // 通常の解探索。
+    // 開始時に制約伝播を1回だけ行い、
+    // その後は SearchAnySolution() に渡す。
+    // ================================================================
+    private bool SolveOne()
+    {
+        if (_stopwatch is null)
+            throw new InvalidOperationException(
+                "Stopwatch is not initialized.");
+
+        if (TimeIsUp())
         {
             _aborted = true;
             return false;
         }
 
-        var checkpoint = CreateCheckpoint();
+        var checkpoint =
+            CreateCheckpoint();
 
         if (!Propagate() || _aborted)
         {
@@ -606,27 +690,11 @@ public class KillerBacktrackingSolver
             return false;
         }
 
-        var target = FindMrvCell();
-        if (target is null) return true; // 全マス確定 = 解けた（この状態を保持したまま返す）
-
-        var (row, col, mask) = target.Value;
-
-        foreach (int digit in IterateDigits(mask))
-        {
-            if (_aborted) break;
-
-            var branchCheckpoint = CreateCheckpoint();
-
-            SetGridValue(row, col, digit);
-
-            if (SolveOne()) return true;
-
-            Restore(branchCheckpoint);
-
-            if (TimeIsUp()) { _aborted = true; break; }
-        }
+        if (SearchAnySolution())
+            return true;
 
         Restore(checkpoint);
+
         return false;
     }
 
@@ -851,15 +919,26 @@ public class KillerBacktrackingSolver
             int usedSum = 0;
             int filledCount = 0;
 
-            // ====== 既に確定している数字を調べる ======
+            int emptyCount = 0;
+
+            // ------------------------------------------------------------
+            // 確定セルと空セルを分離する。
+            // ------------------------------------------------------------
             foreach (var (row, col) in cage.Cells)
             {
-                int value = _grid[row, col];
+                int value =
+                    _grid[row, col];
 
                 if (value == 0)
-                    continue;
+                {
+                    _emptyCellBuffer[emptyCount++] =
+                        (row, col);
 
-                int bit = 1 << (value - 1);
+                    continue;
+                }
+
+                int bit =
+                    1 << (value - 1);
 
                 // ケージ内重複
                 if ((usedMask & bit) != 0)
@@ -870,9 +949,13 @@ public class KillerBacktrackingSolver
                 filledCount++;
             }
 
-            int remainingCount = cage.Cells.Count - filledCount;
+            int remainingCount =
+                cage.Cells.Count -
+                filledCount;
 
-            // ====== ケージが完成している場合 ======
+            // ------------------------------------------------------------
+            // 完成済みケージ
+            // ------------------------------------------------------------
             if (remainingCount == 0)
             {
                 if (usedSum != cage.TargetSum)
@@ -881,86 +964,107 @@ public class KillerBacktrackingSolver
                 continue;
             }
 
-            // ====== 合計値から候補となる数字の組み合わせを取得 ======
-            var combos = GetComboMasks(cage.Cells.Count, cage.TargetSum);
+            var combos =
+                GetComboMasks(
+                    cage.Cells.Count,
+                    cage.TargetSum);
 
-            var emptyCells = new List<(int Row, int Col)>();
+            Array.Clear(
+                _allowedPerCellBuffer,
+                0,
+                emptyCount);
 
-            foreach (var cell in cage.Cells)
-            {
-                if (_grid[cell.Row, cell.Col] == 0)
-                    emptyCells.Add(cell);
-            }
+            bool anyValidCombo =
+                false;
 
-            // 各セルに最終的に許可する数字
-            var allowedPerCell = new Dictionary<(int Row, int Col), int>();
-
-            foreach (var cell in emptyCells)
-                allowedPerCell[cell] = 0;
-
-            bool anyValidCombo = false;
-
-            // ====== 各組み合わせを検証 ======
+            // ------------------------------------------------------------
+            // 合計値から可能な数字集合を調べる。
+            // ------------------------------------------------------------
             foreach (int comboMask in combos)
             {
-                // 既に配置されている数字を含んでいない組み合わせは無効
                 if ((comboMask & usedMask) != usedMask)
                     continue;
 
-                int remainingMask = comboMask & ~usedMask;
+                int remainingMask =
+                    comboMask &
+                    ~usedMask;
 
-                // 念のため、空きセル数と数字数が一致しているか確認
-                if (PopCount(remainingMask) != emptyCells.Count)
-                    continue;
-
-                // ====== この組み合わせを実際にセルへ割り当てられるか確認 ======
-                int[] comboAllowed = GetComboAllowedMasks(emptyCells, remainingMask);
-
-                bool comboIsValid = false;
-
-                for (int i = 0; i < emptyCells.Count; i++)
+                if (BitOperations.PopCount(
+                        (uint)remainingMask) != emptyCount)
                 {
-                    if (comboAllowed[i] == 0)
+                    continue;
+                }
+
+                Array.Clear(
+                    _comboAllowedBuffer,
+                    0,
+                    emptyCount);
+
+                GetComboAllowedMasks(
+                    _emptyCellBuffer,
+                    emptyCount,
+                    remainingMask,
+                    _comboAllowedBuffer);
+
+                bool comboIsValid =
+                    false;
+
+                for (int i = 0; i < emptyCount; i++)
+                {
+                    int allowed =
+                        _comboAllowedBuffer[i];
+
+                    if (allowed == 0)
                         continue;
 
                     comboIsValid = true;
 
-                    var cell = emptyCells[i];
-
-                    allowedPerCell[cell] |= comboAllowed[i];
+                    _allowedPerCellBuffer[i] |=
+                        allowed;
                 }
 
                 if (comboIsValid)
                     anyValidCombo = true;
             }
 
-            // ====== 有効な組み合わせが1つもない ======
             if (!anyValidCombo)
                 return false;
 
-            // ====== 各セルの候補をさらに絞り込む ======
-            foreach (var cell in emptyCells)
+            // ------------------------------------------------------------
+            // 各セルの候補をケージ制約で絞り込む。
+            // ------------------------------------------------------------
+            for (int i = 0; i < emptyCount; i++)
             {
-                int newMask = _candidates[cell.Row, cell.Col] & allowedPerCell[cell];
+                var (row, col) =
+                    _emptyCellBuffer[i];
+
+                int newMask =
+                    _candidates[row, col] &
+                    _allowedPerCellBuffer[i];
 
                 if (newMask == 0)
                     return false;
 
-                SetCandidates(cell.Row, cell.Col, newMask);
+                SetCandidates(
+                    row,
+                    col,
+                    newMask);
             }
         }
 
         return true;
     }
 
-    private int[] GetComboAllowedMasks(
-        List<(int Row, int Col)> cells,
-        int remainingMask)
+    private void GetComboAllowedMasks(
+        (int Row, int Col)[] cells,
+        int cellCount,
+        int remainingMask,
+        int[] allowed)
     {
-        int cellCount = cells.Count;
-
-        int[] allowed =
-            new int[cellCount];
+        Array.Clear(
+            allowed,
+            0,
+            cellCount);
 
         int allCellMask =
             (1 << cellCount) - 1;
@@ -986,10 +1090,12 @@ public class KillerBacktrackingSolver
                     possible - 1;
 
                 int nextCellMask =
-                    allCellMask & ~cellBit;
+                    allCellMask &
+                    ~cellBit;
 
                 int nextDigitMask =
-                    remainingMask & ~digitBit;
+                    remainingMask &
+                    ~digitBit;
 
                 if (CanCompleteAssignment(
                     cells,
@@ -1000,12 +1106,10 @@ public class KillerBacktrackingSolver
                 }
             }
         }
-
-        return allowed;
     }
 
     private bool CanCompleteAssignment(
-        List<(int Row, int Col)> cells,
+        (int Row, int Col)[] cells,
         int remainingCellMask,
         int remainingDigitMask)
     {
@@ -1092,7 +1196,8 @@ public class KillerBacktrackingSolver
             if (CanCompleteAssignment(
                 cells,
                 nextCellMask,
-                remainingDigitMask & ~digitBit))
+                remainingDigitMask &
+                ~digitBit))
             {
                 return true;
             }

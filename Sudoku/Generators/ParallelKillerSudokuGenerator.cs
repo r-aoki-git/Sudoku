@@ -50,9 +50,36 @@ public static class ParallelKillerSudokuGenerator
         if (maxEscalations < 0)
             throw new ArgumentOutOfRangeException(nameof(maxEscalations));
 
-        int workers = Math.Max(1, workerCount ?? DefaultWorkerCount);
+        int workers = Math.Max(
+            1,
+            workerCount ?? DefaultWorkerCount);
 
-        int currentTimeout = overallTimeoutMs;
+        // ------------------------------------------------------------
+        // 難易度に必要な最低予算を保証する。
+        // 呼び出し側がHard用の2500msを渡しても、
+        // Expert / Master では必要な検証時間を確保する。
+        // ------------------------------------------------------------
+        int minimumPerAttemptBudget =
+            GetMinimumPerAttemptBudget(
+                difficulty);
+
+        int effectivePerAttemptBudget =
+            Math.Max(
+                perAttemptBudgetMs,
+                minimumPerAttemptBudget);
+
+        // ------------------------------------------------------------
+        // 難易度に必要な最低Round時間を保証する。
+        // ------------------------------------------------------------
+        int minimumOverallTimeout =
+            GetMinimumOverallTimeout(
+                difficulty);
+
+        int currentTimeout =
+            Math.Max(
+                overallTimeoutMs,
+                minimumOverallTimeout);
+
         Exception? lastFailure = null;
 
         for (int round = 0; round <= maxEscalations; round++)
@@ -62,7 +89,8 @@ public static class ParallelKillerSudokuGenerator
             Debug.WriteLine(
                 $"[ParallelKillerSudokuGenerator] Round={round}, " +
                 $"Difficulty={difficulty}, Workers={workers}, " +
-                $"TimeoutMs={currentTimeout}, PerAttemptBudgetMs={perAttemptBudgetMs}");
+                $"TimeoutMs={currentTimeout}, " +
+                $"PerAttemptBudgetMs={effectivePerAttemptBudget}");
 
             try
             {
@@ -71,7 +99,7 @@ public static class ParallelKillerSudokuGenerator
                         difficulty,
                         workers,
                         currentTimeout,
-                        perAttemptBudgetMs);
+                        effectivePerAttemptBudget);
 
                 roundStopwatch.Stop();
 
@@ -212,6 +240,34 @@ public static class ParallelKillerSudokuGenerator
         throw new InvalidOperationException(
             $"並列 {workers} ワーカーとも " +
             $"{overallTimeoutMs}ms 以内に成功しませんでした。");
+    }
+
+    private static int GetMinimumPerAttemptBudget(
+        Difficulty difficulty)
+    {
+        return difficulty switch
+        {
+            Difficulty.Easy => 1200,
+            Difficulty.Normal => 1800,
+            Difficulty.Hard => 2500,
+            Difficulty.Expert => 6500,
+            Difficulty.Master => 10000,
+            _ => 2500
+        };
+    }
+
+    private static int GetMinimumOverallTimeout(
+        Difficulty difficulty)
+    {
+        return difficulty switch
+        {
+            Difficulty.Easy => 5000,
+            Difficulty.Normal => 7500,
+            Difficulty.Hard => 10000,
+            Difficulty.Expert => 20000,
+            Difficulty.Master => 30000,
+            _ => 10000
+        };
     }
 
     private static (Board Solution, List<Cage> Cages)? RunWorker(

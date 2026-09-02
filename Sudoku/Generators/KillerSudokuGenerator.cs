@@ -21,16 +21,48 @@ public class KillerSudokuGenerator
     // ケージ生成に割り当てる予算はごく小さくてよい。
     private const int CageBudgetMs = 100;
 
-    // 難易度判定に使う予算
-    private const int HumanBudgetMs = 400;
-
-    // 唯一解検証（バックトラッキング）に使う予算。
-    // 難易度判定より先に実行し、複数解になるケージ構成を
-    // 人間解法の前に除外する。
+    // ------------------------------------------------------------
+    // 難易度別の検証予算
     //
-    // 生成済みの完成盤面を既知解として渡し、
-    // 「既知解とは異なる別解」の有無だけを探索する。
-    private const int UniquenessBudgetMs = 1200;
+    // Expert / Master はケージ数が少なく、平均ケージサイズが大きいため、
+    // 「既知解とは異なる解」の探索コストが Hard 以下より大きくなる。
+    //
+    // ここでは生成時間を無制限に増やすのではなく、
+    // 難易度そのものに応じて唯一解検証へ与える予算を増やす。
+    // ------------------------------------------------------------
+    private static int GetUniquenessBudgetMs(
+        Difficulty difficulty)
+    {
+        return difficulty switch
+        {
+            Difficulty.Easy => 500,
+            Difficulty.Normal => 700,
+            Difficulty.Hard => 1200,
+            Difficulty.Expert => 5000,
+            Difficulty.Master => 8000,
+            _ => 1200
+        };
+    }
+
+    // ------------------------------------------------------------
+    // 人間解法の予算
+    //
+    // Expert / Master は難しいケージ構造を扱うため、
+    // Hard と同じ400msでは判定途中で切れる可能性がある。
+    // ------------------------------------------------------------
+    private static int GetHumanBudgetMs(
+        Difficulty difficulty)
+    {
+        return difficulty switch
+        {
+            Difficulty.Easy => 250,
+            Difficulty.Normal => 300,
+            Difficulty.Hard => 400,
+            Difficulty.Expert => 800,
+            Difficulty.Master => 1200,
+            _ => 400
+        };
+    }
 
     private readonly Random _random;
     private readonly BacktrackingSolver _solver;
@@ -104,14 +136,20 @@ public class KillerSudokuGenerator
             if (remaining < MinAttemptBudgetMs)
                 break;
 
+            int uniquenessBudgetLimit =
+                GetUniquenessBudgetMs(difficulty);
+
+            int humanBudgetLimit =
+                GetHumanBudgetMs(difficulty);
+
             int cageBudget =
                 (int)Math.Min(
                     CageBudgetMs,
                     Math.Max(
                         MinAttemptBudgetMs,
                         remaining -
-                        UniquenessBudgetMs -
-                        HumanBudgetMs -
+                        uniquenessBudgetLimit -
+                        humanBudgetLimit -
                         MinAttemptBudgetMs));
 
             List<Cage>? cages;
@@ -168,7 +206,7 @@ public class KillerSudokuGenerator
 
             long uniquenessBudget =
                 Math.Min(
-                    UniquenessBudgetMs,
+                    uniquenessBudgetLimit,
                     Math.Max(
                         MinAttemptBudgetMs,
                         budgetMs -
@@ -222,7 +260,7 @@ public class KillerSudokuGenerator
 
             int humanBudget =
                 (int)Math.Min(
-                    HumanBudgetMs,
+                    humanBudgetLimit,
                     remaining);
 
             var humanStopwatch =
@@ -274,6 +312,8 @@ public class KillerSudokuGenerator
                     $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
                     $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
                     $"Human={humanStopwatch.ElapsedMilliseconds}ms, " +
+                    $"UniqueBudget={uniquenessBudget}ms, " +
+                    $"HumanBudget={humanBudget}ms, " +
                     $"UniqueResult={uniquenessResult}, " +
                     $"Solved={humanResult.Solved}, " +
                     $"Fallback={humanResult.RequiredFallback}, " +

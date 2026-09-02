@@ -73,22 +73,22 @@ public sealed class CageGenerator
 
             [Difficulty.Expert] =
                 (
-                    MaxSize: 7,
-                    MinAvg: 3.0,
-                    TargetAvg: 3.8,
-                    MaxAvg: 5.0,
-                    MaxSingles: 5,
-                    MaxSize5: 8
+                    MaxSize: 6,
+                    MinAvg: 2.8,
+                    TargetAvg: 3.4,
+                    MaxAvg: 4.5,
+                    MaxSingles: 4,
+                    MaxSize5: 10
                 ),
 
             [Difficulty.Master] =
                 (
-                    MaxSize: 8,
-                    MinAvg: 3.5,
-                    TargetAvg: 4.2,
-                    MaxAvg: 5.5,
+                    MaxSize: 7,
+                    MinAvg: 3.1,
+                    TargetAvg: 3.8,
+                    MaxAvg: 5.0,
                     MaxSingles: 3,
-                    MaxSize5: 12
+                    MaxSize5: 14
                 ),
         };
 
@@ -96,7 +96,7 @@ public sealed class CageGenerator
     /// CageGenerator 1回の呼び出しで、パーティションの再試行上限。
     /// Union-Find方式は1回の分割が非常に高速（< 1ms）なので、多くの試行が可能。
     /// </summary>
-    private const int MaxPartitionAttempts = 200;
+    private const int MaxPartitionAttempts = 300;
 
     /// <summary>
     /// 全隣接ペア（辺を共有するセルの組み合わせ）を事前計算して保持。
