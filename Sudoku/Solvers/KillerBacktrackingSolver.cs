@@ -33,6 +33,17 @@ public class KillerBacktrackingSolver
     private readonly int[] _boxUsed =
         new int[Board.Size];
 
+    // ------------------------------------------------------------
+    // ApplyCageConstraints() の結果キャッシュ。
+    //
+    // Propagate() は固定点に達するまで毎回全ケージを再解析するが、
+    // 深い探索の1手先などでは、実際に候補・確定値が変化したのは
+    // ごく一部のセルだけであることが多い。そこで、各ケージについて
+    // 「最後に解析した時点の確定値・候補マスク」をシグネチャとして
+    // 保持し、シグネチャが変化していなければ再解析をスキップする。
+    // ------------------------------------------------------------
+    private readonly Dictionary<Cage, long> _cageStableSignature = new();
+
     private System.Diagnostics.Stopwatch? _stopwatch;
     private int _timeBudgetMs;
     private bool _aborted;
@@ -589,6 +600,7 @@ public class KillerBacktrackingSolver
 
         _trail.Clear();
         _candidateTrail.Clear();
+        _cageStableSignature.Clear();
     }
 
     private void WriteBackToBoard(Board board)
@@ -915,6 +927,17 @@ public class KillerBacktrackingSolver
     {
         foreach (var cage in _cages)
         {
+            long signature = ComputeCageSignature(cage);
+
+            if (_cageStableSignature.TryGetValue(cage, out long cachedSignature) &&
+                cachedSignature == signature)
+            {
+                // 前回このケージを解析した時点から、関係するマスの
+                // 確定値・候補マスクが変化していない。
+                // 結果は既に候補へ反映済みのため、再解析をスキップする。
+                continue;
+            }
+
             int usedMask = 0;
             int usedSum = 0;
             int filledCount = 0;
@@ -961,6 +984,7 @@ public class KillerBacktrackingSolver
                 if (usedSum != cage.TargetSum)
                     return false;
 
+                _cageStableSignature[cage] = signature;
                 continue;
             }
 
@@ -1050,9 +1074,35 @@ public class KillerBacktrackingSolver
                     col,
                     newMask);
             }
+
+            // このケージについて絞り込みが完了した状態のシグネチャを記録する。
+            _cageStableSignature[cage] = ComputeCageSignature(cage);
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// ケージ内の各セルの「確定値、または候補マスク」から、
+    /// 現在の状態を表すシグネチャを計算する。
+    /// 同じシグネチャが得られる限り、ApplyCageConstraintsの結果は
+    /// 必ず同じになる（純粋にグリッドと候補の現在値だけで決まるため）。
+    /// </summary>
+    private long ComputeCageSignature(Cage cage)
+    {
+        unchecked
+        {
+            long hash = 17;
+
+            foreach (var (row, col) in cage.Cells)
+            {
+                int value = _grid[row, col];
+                int part = value != 0 ? value : (1000 + _candidates[row, col]);
+                hash = hash * 31 + part;
+            }
+
+            return hash;
+        }
     }
 
     private void GetComboAllowedMasks(

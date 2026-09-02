@@ -12,13 +12,13 @@ public class KillerHumanSolver : HumanSolver
     public KillerHumanSolver(List<Cage> cages)
         : base(
             BuildTechniques(cages),
-            (board, cancellationToken) =>
+            (board, remainingBudgetMs, cancellationToken) =>
                 new KillerBacktrackingSolver(
                     cages,
                     cancellationToken)
                     .TrySolve(
                         board,
-                        timeBudgetMs: 5000,
+                        timeBudgetMs: remainingBudgetMs,
                         cancellationToken: cancellationToken))
     {
     }

@@ -1,6 +1,7 @@
 using Sudoku.Models;
 using Sudoku.Solvers;
 using System.Diagnostics;
+using System.Collections.Concurrent;
 
 namespace Sudoku.Generators;
 
@@ -15,6 +16,7 @@ namespace Sudoku.Generators;
 /// - O(n) でグリッド全体のパーティションが完了（n は隣接ペア数 ≈ 144）。
 /// - 同一数字禁止と連結性は統合段階で常に保証する。
 /// </summary>
+
 public sealed class CageGenerator
 {
     private readonly Random _random;
@@ -136,6 +138,7 @@ public sealed class CageGenerator
 
             var cageIndices = TryRandomMergePartition(
                 digits,
+                difficulty,
                 param.MaxSize,
                 param.MinAvg,
                 param.TargetAvg,
@@ -158,6 +161,108 @@ public sealed class CageGenerator
     // ランダムマージ（Union-Find）方式
     // ================================================================
 
+    // ================================================================
+    // ケージの「曖昧さ」（数字の組み合わせ数）に基づく、マージ優先度の算出
+    //
+    // あるサイズ・合計値のケージについて、1〜9から相異なる数字を選んで
+    // 合計を満たす組み合わせが何通りあるかを数える。
+    //   組み合わせが少ない → そのケージ単体でも数字を絞り込みやすい（易しい）
+    //   組み合わせが多い   → 他のケージ・ユニットと照合しないと絞り込めない（難しい）
+    //
+    // CageGeneratorはケージの形（どのマスをまとめるか）だけを選んでおり、
+    // 数字自体は既に確定した完成盤面から決まるため、動かせるのは
+    // 「どのマスをまとめるか」だけである。そこで、マージ候補ごとに
+    // 生成される（サイズ, 合計）の組み合わせ数を見て、要求難易度に
+    // ふさわしいケージほど優先的に採用する。
+    // ================================================================
+
+    private static readonly ConcurrentDictionary<(int Size, int Sum), int> ComboCountCache = new();
+    private static readonly ConcurrentDictionary<int, int> MaxComboCountCache = new();
+
+    /// <summary>1〜9からsize個の相異なる数字を選び合計がsumになる組み合わせ数（キャッシュ付き）。</summary>
+    private static int GetComboCount(int size, int sum)
+    {
+        return ComboCountCache.GetOrAdd((size, sum), key =>
+        {
+            int count = 0;
+            CountCombosRecursive(1, key.Size, key.Sum, ref count);
+            return count;
+        });
+    }
+
+    private static void CountCombosRecursive(int start, int remainingSize, int remainingSum, ref int count)
+    {
+        if (remainingSize == 0)
+        {
+            if (remainingSum == 0)
+                count++;
+            return;
+        }
+
+        for (int d = start; d <= 9; d++)
+        {
+            if (d > remainingSum) break;
+            CountCombosRecursive(d + 1, remainingSize - 1, remainingSum - d, ref count);
+        }
+    }
+
+    /// <summary>指定サイズのケージが取りうる組み合わせ数の理論上の最大値（合計値を動かして探索）。</summary>
+    private static int GetMaxComboCountForSize(int size)
+    {
+        return MaxComboCountCache.GetOrAdd(size, sz =>
+        {
+            int minSum = sz * (sz + 1) / 2;
+
+            int maxSum = 0;
+            for (int i = 0; i < sz; i++)
+                maxSum += 9 - i;
+
+            int best = 0;
+            for (int s = minSum; s <= maxSum; s++)
+                best = Math.Max(best, GetComboCount(sz, s));
+
+            return Math.Max(best, 1);
+        });
+    }
+
+    /// <summary>数字マスクに含まれる数字の合計値を返す。</summary>
+    private static int SumOfDigitMask(int mask)
+    {
+        int sum = 0;
+        for (int d = 1; d <= 9; d++)
+            if ((mask & (1 << (d - 1))) != 0)
+                sum += d;
+        return sum;
+    }
+
+    /// <summary>
+    /// このマージで生成されるケージ（サイズ, 合計）が、要求難易度にとって
+    /// 好ましい「曖昧さ」であるほど1に近い値を返す（0〜1）。
+    /// Easy/Normal: 組み合わせが少ない（絞り込みやすい）ケージを優先。
+    /// Hard/Expert/Master: 組み合わせが多い（複数ケージをまたぐ推理が必要な）ケージを優先。
+    /// </summary>
+    private static double GetMergePreferenceScore(Difficulty difficulty, int size, int sum)
+    {
+        if (size < 2)
+            return 1.0;
+
+        int maxCombos = GetMaxComboCountForSize(size);
+        if (maxCombos <= 1)
+            return 1.0;
+
+        double ambiguityRatio = (double)GetComboCount(size, sum) / maxCombos;
+
+        return difficulty switch
+        {
+            Difficulty.Easy => 1.0 - ambiguityRatio,
+            Difficulty.Normal => 1.0 - (ambiguityRatio * 0.6),
+            Difficulty.Hard => 0.4 + (ambiguityRatio * 0.6),
+            Difficulty.Expert => 0.2 + (ambiguityRatio * 0.8),
+            Difficulty.Master => ambiguityRatio,
+            _ => 1.0,
+        };
+    }
+
     /// <summary>
     /// 全81セルを個別ケージとして初期化し、
     /// 隣接ペアをランダム順に統合していくことでケージを構築する。
@@ -175,6 +280,7 @@ public sealed class CageGenerator
     /// </summary>
     private List<List<int>>? TryRandomMergePartition(
         int[] digits,
+        Difficulty difficulty,
         int maxSize,
         double minAvg,
         double targetAvg,
@@ -327,6 +433,24 @@ public sealed class CageGenerator
                     if (currentSize5Count >= maxSize5)
                         continue;
                 }
+
+                // --------------------------------------------------------
+                // 難易度に応じたケージの「曖昧さ」の優先度を考慮する。
+                // ここで採用されなかった辺は、次のパス以降で再シャッフル
+                // された順序で改めて検討されるため、統合自体が止まる
+                // ことはない。
+                // --------------------------------------------------------
+                int mergedDigitMask =
+                    digitMask[rootA] | digitMask[rootB];
+
+                double mergePreference =
+                    GetMergePreferenceScore(
+                        difficulty,
+                        newSize,
+                        SumOfDigitMask(mergedDigitMask));
+
+                if (_random.NextDouble() > mergePreference)
+                    continue;
 
                 Union(
                     parent,

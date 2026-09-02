@@ -38,7 +38,7 @@ public class KillerSudokuGenerator
             Difficulty.Easy => 500,
             Difficulty.Normal => 700,
             Difficulty.Hard => 1200,
-            Difficulty.Expert => 5000,
+            Difficulty.Expert => 6000,
             Difficulty.Master => 8000,
             _ => 1200
         };
@@ -191,65 +191,13 @@ public class KillerSudokuGenerator
             _totalAttempts++;
 
             // ---------------------------------------------------------
-            // ① 先に唯一解を検証する。
-            // _solutionは既に生成済みなので、
-            // 「_solutionとは異なる別解」が存在するかだけを探索する。
-            // ---------------------------------------------------------
-            var killerSolver =
-                new KillerBacktrackingSolver(
-                    cages,
-                    cancellationToken);
-
-            if (_solution is null)
-                throw new InvalidOperationException(
-                    "一意解検証に必要な完成盤面が存在しません。");
-
-            long uniquenessBudget =
-                Math.Min(
-                    uniquenessBudgetLimit,
-                    Math.Max(
-                        MinAttemptBudgetMs,
-                        budgetMs -
-                        overallStopwatch.ElapsedMilliseconds));
-
-            if (uniquenessBudget < MinAttemptBudgetMs)
-                break;
-
-
-            var uniquenessStopwatch =
-                Stopwatch.StartNew();
-
-            int uniquenessResult =
-                killerSolver.CheckUniqueAgainstKnownSolution(
-                    new Board(),
-                    _solution,
-                    timeBudgetMs: (int)uniquenessBudget,
-                    cancellationToken: cancellationToken);
-
-            uniquenessStopwatch.Stop();
-
-
-            if (uniquenessResult != 1)
-            {
-                attemptStopwatch.Stop();
-
-                if (SolverDiagnostics.VerboseLogging)
-                {
-                    Debug.WriteLine(
-                        $"[UniquenessReject] " +
-                        $"Result={uniquenessResult}, " +
-                        $"Attempts={_totalAttempts}, " +
-                        $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
-                        $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
-                        $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
-                        $"Budget={uniquenessBudget}ms");
-                }
-
-                continue;
-            }
-
-            // ---------------------------------------------------------
-            // ② 唯一解が確認できたケージ構成についてのみ、難易度判定を行う。
+            // ① 先に人間解法による難易度判定を行う。
+            //
+            // 一意解検証（②）は分岐を伴う探索で、特にExpert/Masterでは
+            // 数百ms〜数秒かかる。要求難易度と一致しないケージ構成に
+            // その時間を費やすのは無駄なので、humanBudgetLimitで頭打ち
+            // される軽い難易度判定を先に行い、一致しないものは
+            // 一意解検証に進む前に棄却する。
             // ---------------------------------------------------------
             remaining =
                 budgetMs -
@@ -291,7 +239,6 @@ public class KillerSudokuGenerator
                         $"Attempts={_totalAttempts}, " +
                         $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
                         $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
-                        $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
                         $"Human={humanStopwatch.ElapsedMilliseconds}ms");
                 }
 
@@ -301,7 +248,109 @@ public class KillerSudokuGenerator
             var difficultyResult =
                 _difficultyScorer.Evaluate(humanResult);
 
+            // Masterは「人間解法だけでは解ききれない」ことこそが判定条件のため、
+            // RequiredFallback=true自体を理由に破棄してはならない。
+            // フォールバックでも実際には解けなかった場合だけ破棄する。
+            if (humanResult.RequiredFallback)
+            {
+                if (difficulty != Difficulty.Master || !humanResult.FallbackSolved)
+                {
+                    attemptStopwatch.Stop();
+
+                    if (SolverDiagnostics.VerboseLogging)
+                    {
+                        Debug.WriteLine(
+                            $"[DifficultyReject] " +
+                            $"Requested={difficulty}, " +
+                            $"Status=Stuck, " +
+                            $"Score={difficultyResult.Score}, " +
+                            $"Attempts={_totalAttempts}, " +
+                            $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                            $"Human={humanStopwatch.ElapsedMilliseconds}ms");
+                    }
+
+                    continue;
+                }
+            }
+            else if (difficultyResult.Label != difficulty)
+            {
+                attemptStopwatch.Stop();
+
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    Debug.WriteLine(
+                        $"[DifficultyReject] " +
+                        $"Requested={difficulty}, " +
+                        $"Actual={difficultyResult.Label}, " +
+                        $"Score={difficultyResult.Score}, " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Human={humanStopwatch.ElapsedMilliseconds}ms");
+                }
+
+                continue;
+            }
+
+            // ---------------------------------------------------------
+            // ② 難易度が一致したケージ構成についてのみ、一意解を検証する。
+            // ---------------------------------------------------------
+            if (_solution is null)
+                throw new InvalidOperationException(
+                    "一意解検証に必要な完成盤面が存在しません。");
+
+            remaining =
+                budgetMs -
+                overallStopwatch.ElapsedMilliseconds;
+
+            if (remaining < MinAttemptBudgetMs)
+                break;
+
+            long uniquenessBudget =
+                Math.Min(
+                    uniquenessBudgetLimit,
+                    Math.Max(
+                        MinAttemptBudgetMs,
+                        remaining));
+
+            if (uniquenessBudget < MinAttemptBudgetMs)
+                break;
+
+            var killerSolver =
+                new KillerBacktrackingSolver(
+                    cages,
+                    cancellationToken);
+
+            var uniquenessStopwatch =
+                Stopwatch.StartNew();
+
+            int uniquenessResult =
+                killerSolver.CheckUniqueAgainstKnownSolution(
+                    new Board(),
+                    _solution,
+                    timeBudgetMs: (int)uniquenessBudget,
+                    cancellationToken: cancellationToken);
+
+            uniquenessStopwatch.Stop();
+
             attemptStopwatch.Stop();
+
+            if (uniquenessResult != 1)
+            {
+                if (SolverDiagnostics.VerboseLogging)
+                {
+                    Debug.WriteLine(
+                        $"[UniquenessReject] " +
+                        $"Result={uniquenessResult}, " +
+                        $"Attempts={_totalAttempts}, " +
+                        $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Human={humanStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
+                        $"Budget={uniquenessBudget}ms");
+                }
+
+                continue;
+            }
 
             if (SolverDiagnostics.VerboseLogging)
             {
@@ -310,46 +359,17 @@ public class KillerSudokuGenerator
                     $"Attempt={_totalAttempts}, " +
                     $"AttemptElapsed={attemptStopwatch.ElapsedMilliseconds}ms, " +
                     $"Cage={cageStopwatch.ElapsedMilliseconds}ms, " +
-                    $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
                     $"Human={humanStopwatch.ElapsedMilliseconds}ms, " +
-                    $"UniqueBudget={uniquenessBudget}ms, " +
+                    $"Unique={uniquenessStopwatch.ElapsedMilliseconds}ms, " +
                     $"HumanBudget={humanBudget}ms, " +
+                    $"UniqueBudget={uniquenessBudget}ms, " +
                     $"UniqueResult={uniquenessResult}, " +
                     $"Solved={humanResult.Solved}, " +
                     $"Fallback={humanResult.RequiredFallback}, " +
                     $"Remaining={humanResult.RemainingCells}, " +
                     $"Actual={difficultyResult.Label}, " +
                     $"Score={difficultyResult.Score}");
-            }
 
-            if (SolverDiagnostics.VerboseLogging)
-            {
-                Debug.WriteLine(
-                    $"[DifficultyCheck] " +
-                    $"Requested={difficulty}, " +
-                    $"Actual={difficultyResult.Label}, " +
-                    $"Status={difficultyResult.Status}, " +
-                    $"Score={difficultyResult.Score}, " +
-                    $"MaxLv={difficultyResult.MaxLevel}, " +
-                    $"Fallback={difficultyResult.UsedFallback}, " +
-                    $"Remaining={difficultyResult.Remaining}");
-            }
-
-            // Masterは「人間解法だけでは解ききれない」ことこそが判定条件のため、
-            // RequiredFallback=true自体を理由に破棄してはならない。
-            // フォールバックでも実際には解けなかった場合だけ破棄する。
-            if (humanResult.RequiredFallback)
-            {
-                if (difficulty != Difficulty.Master || !humanResult.FallbackSolved)
-                    continue;
-            }
-            else if (difficultyResult.Label != difficulty)
-            {
-                continue;
-            }
-
-            if (SolverDiagnostics.VerboseLogging)
-            {
                 Debug.WriteLine(
                     $"[成功] " +
                     $"経過{overallStopwatch.ElapsedMilliseconds}ms, " +

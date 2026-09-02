@@ -250,7 +250,7 @@ public static class ParallelKillerSudokuGenerator
             Difficulty.Easy => 1200,
             Difficulty.Normal => 1800,
             Difficulty.Hard => 2500,
-            Difficulty.Expert => 6500,
+            Difficulty.Expert => 9000,
             Difficulty.Master => 10000,
             _ => 2500
         };
@@ -264,7 +264,7 @@ public static class ParallelKillerSudokuGenerator
             Difficulty.Easy => 5000,
             Difficulty.Normal => 7500,
             Difficulty.Hard => 10000,
-            Difficulty.Expert => 20000,
+            Difficulty.Expert => 30000,
             Difficulty.Master => 30000,
             _ => 10000
         };
