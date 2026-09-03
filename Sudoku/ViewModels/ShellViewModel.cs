@@ -25,14 +25,14 @@ public class ShellViewModel : ViewModelBase
     private TitleViewModel CreateTitleViewModel()
     {
         var vm = new TitleViewModel(_saveService.HasSaveData);
-        vm.StartGameRequested += (_, difficulty) => ShowNewGame(difficulty);
+        vm.StartGameRequested += (_, args) => ShowNewGame(args.Difficulty, args.Mode);
         vm.ContinueGameRequested += (_, _) => ShowContinuedGame();
         return vm;
     }
 
-    private void ShowNewGame(Sudoku.Solvers.Difficulty difficulty)
+    private void ShowNewGame(Sudoku.Solvers.Difficulty difficulty, Sudoku.Solvers.GameMode mode)
     {
-        var gameViewModel = new GameViewModel(difficulty);
+        var gameViewModel = new GameViewModel(difficulty, mode);
         AttachHomeNavigation(gameViewModel);
         CurrentViewModel = gameViewModel;
     }

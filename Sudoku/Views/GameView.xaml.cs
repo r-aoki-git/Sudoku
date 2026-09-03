@@ -19,6 +19,7 @@ public partial class GameView : UserControl
     {
         if (DataContext is not GameViewModel vm) return;
         var board = vm.Board;
+        if (board is null) return;
 
         switch (e.Key)
         {
@@ -87,6 +88,7 @@ public partial class GameView : UserControl
     private void Board_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (DataContext is not GameViewModel vm) return;
+        if (vm.Board is null) return;
         vm.Board.ToggleHoverAssistMode();
         e.Handled = true;
     }

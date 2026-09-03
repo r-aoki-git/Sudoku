@@ -6,6 +6,8 @@ namespace Sudoku
 {
     public partial class App : Application
     {
+        /*
+
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
@@ -31,5 +33,7 @@ namespace Sudoku
                 overallTimeoutMs: 10000,
                 perAttemptBudgetMs: 2500);
         }
+
+        */
     }
 }

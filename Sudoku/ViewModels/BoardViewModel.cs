@@ -12,6 +12,7 @@ public class BoardViewModel : ViewModelBase
     private readonly Board _board;
     private readonly Board _solution;
     private readonly CommandHistory _history = new();
+    private readonly List<Cage>? _cages;
 
     public event EventHandler? PuzzleSolved;
 
@@ -63,7 +64,7 @@ public class BoardViewModel : ViewModelBase
         private set => SetProperty(ref _hoverAssistMode, value);
     }
 
-    public BoardViewModel(Board board, Board solution)
+    public BoardViewModel(Board board, Board solution, List<Cage>? cages = null)
     {
         ToggleMemoModeCommand = new RelayCommand(_ => ToggleMemoMode());
 
@@ -76,11 +77,16 @@ public class BoardViewModel : ViewModelBase
 
         _board = board;
         _solution = solution;
+        _cages = cages;
+
+        var cageInfoMap = BuildCageCellInfoMap(cages);
 
         for (int r = 0; r < Board.Size; r++)
             for (int c = 0; c < Board.Size; c++)
+            {
+                cageInfoMap.TryGetValue((r, c), out var cageInfo);
                 Cells.Add(new CellViewModel(_board.GetCell(r, c), r, c));
-
+            }
         RefreshConflicts();
     }
 
@@ -247,9 +253,19 @@ public class BoardViewModel : ViewModelBase
                 cell.IsConflict = true;
         }
 
+        // キラーナンプレ：ケージ内の数字重複・合計値の矛盾を赤く表示する。
+        MarkCageConflicts();
+
         UpdateNumberPadAvailability();
 
-        if (_board.IsComplete())
+        // 「全マス埋まっている」だけでなく「全マスに矛盾がない」こともクリア条件に含める。
+        // キラーナンプレは初期配置が一切ないため、Board.IsComplete()（行・列・ブロックの
+        // 重複チェックのみ）だけで判定すると、正解とは異なる別の合法な完成形でも
+        // クリア扱いになってしまう（ケージ合計を満たさない完成形が多数存在するため）。
+        // 上のループで「正解と異なる値」は必ずIsConflictが立つので、これを追加条件にする。
+        bool isComplete = _board.IsComplete() && Cells.All(c => !c.IsConflict);
+
+        if (isComplete)
             PuzzleSolved?.Invoke(this, EventArgs.Empty);
     }
 
@@ -280,6 +296,46 @@ public class BoardViewModel : ViewModelBase
                     cell.IsConflict = true;
     }
 
+    /// <summary>ケージ内の数字重複、および確定済みケージの合計値不一致をIsConflictへ反映する</summary>
+    private void MarkCageConflicts()
+    {
+        if (_cages is null) return;
+
+        foreach (var cage in _cages)
+        {
+            var cellVms = cage.Cells
+                .Select(pos => Cells[pos.Row * Board.Size + pos.Col])
+                .ToList();
+
+            var filledVms = cellVms.Where(vm => vm.HasValue).ToList();
+
+            // ケージ内の数字重複
+            var duplicates = filledVms
+                .GroupBy(vm => vm.Value!.Value)
+                .Where(g => g.Count() > 1)
+                .SelectMany(g => g);
+
+            foreach (var vm in duplicates)
+                vm.IsConflict = true;
+
+            int sum = filledVms.Sum(vm => vm.Value!.Value);
+            bool allFilled = filledVms.Count == cellVms.Count;
+
+            if (allFilled && sum != cage.TargetSum)
+            {
+                // 全マス埋まっているのに合計が合わない
+                foreach (var vm in cellVms)
+                    vm.IsConflict = true;
+            }
+            else if (!allFilled && sum > cage.TargetSum)
+            {
+                // 埋まっている分だけで既に合計を超過している
+                foreach (var vm in filledVms)
+                    vm.IsConflict = true;
+            }
+        }
+    }
+
     private static bool IsRelated(int row, int col, int selectedRow, int selectedCol)
     {
         if (row == selectedRow) return true;
@@ -301,5 +357,46 @@ public class BoardViewModel : ViewModelBase
         int boxCol2 = (col2 / Board.BoxSize) * Board.BoxSize;
 
         return boxRow1 == boxRow2 && boxCol1 == boxCol2;
+    }
+
+    /// <summary>ケージ一覧から、各マスの境界線描画情報・合計値ラベルを1回だけ計算する</summary>
+    private static Dictionary<(int Row, int Col), CageCellInfo> BuildCageCellInfoMap(List<Cage>? cages)
+    {
+        var map = new Dictionary<(int, int), CageCellInfo>();
+        if (cages is null) return map;
+
+        var cageIndexByCell = new Dictionary<(int, int), int>();
+        for (int i = 0; i < cages.Count; i++)
+            foreach (var cell in cages[i].Cells)
+                cageIndexByCell[(cell.Row, cell.Col)] = i;
+
+        foreach (var cage in cages)
+        {
+            var labelCell = cage.Cells
+                .OrderBy(cell => cell.Row)
+                .ThenBy(cell => cell.Col)
+                .First();
+
+            foreach (var (row, col) in cage.Cells)
+            {
+                int myCageIndex = cageIndexByCell[(row, col)];
+
+                bool IsBorder(int r, int c)
+                {
+                    if (r < 0 || r >= Board.Size || c < 0 || c >= Board.Size) return true;
+                    return !cageIndexByCell.TryGetValue((r, c), out int otherIndex) || otherIndex != myCageIndex;
+                }
+
+                map[(row, col)] = new CageCellInfo()
+                {
+                    BorderTop = IsBorder(row - 1, col),
+                    BorderBottom = IsBorder(row + 1, col),
+                    BorderLeft = IsBorder(row, col - 1),
+                    BorderRight = IsBorder(row, col + 1),
+                    SumText = (row == labelCell.Row && col == labelCell.Col) ? cage.TargetSum.ToString() : ""
+                };
+            }
+        }
+        return map;
     }
 }

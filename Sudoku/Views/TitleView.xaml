@@ -27,6 +27,13 @@
                           Style="{StaticResource AppComboBoxStyle}"
                           Margin="0,0,0,28"/>
 
+                <TextBlock Text="モード" FontSize="15" FontWeight="SemiBold"
+                           Foreground="{StaticResource BodyTextBrush}" Margin="0,0,0,8"/>
+                <ComboBox ItemsSource="{Binding GameModeOptions}"
+                          SelectedItem="{Binding SelectedGameMode}"
+                          Style="{StaticResource AppComboBoxStyle}"
+                          Margin="0,0,0,28"/>
+
                 <Button Content="新しいゲーム" Command="{Binding StartGameCommand}"
                         Style="{StaticResource PrimaryButtonStyle}" Margin="0,0,0,12"/>
 

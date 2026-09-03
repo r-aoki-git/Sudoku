@@ -22,11 +22,12 @@ public class SaveDataService
 
     public bool HasSaveData => File.Exists(_filePath);
 
-    public void Save(Difficulty difficulty, TimeSpan elapsed, Board puzzle, Board solution)
+    public void Save(Difficulty difficulty, GameMode mode, TimeSpan elapsed, Board puzzle, Board solution, List<Cage>? cages)
     {
         var data = new SaveData()
         {
             Difficulty = difficulty,
+            Mode = mode,
             ElapsedSeconds = elapsed.TotalSeconds,
         };
 
@@ -47,11 +48,23 @@ public class SaveDataService
             }
         }
 
+        if (cages is not null)
+        {
+            foreach (var cage in cages)
+            {
+                data.Cages.Add(new CageSaveData()
+                {
+                    CellIndexes = cage.Cells.Select(cell => cell.Row * Board.Size + cell.Col).ToList(),
+                    TargetSum = cage.TargetSum
+                });
+            }
+        }
+
         var json = JsonSerializer.Serialize(data);
         File.WriteAllText(_filePath, json);
     }
 
-    public (Board Puzzle, Board Solution, Difficulty Difficulty, TimeSpan Elapsed)? Load()
+    public (Board Puzzle, Board Solution, Difficulty Difficulty, GameMode Mode, List<Cage>? Cages, TimeSpan Elapsed)? Load()
     {
         if (!File.Exists(_filePath)) return null;
 
@@ -86,7 +99,17 @@ public class SaveDataService
                 solution.SetGivenAt(row, col, data.Solution[i]);
             }
 
-            return (puzzle, solution, data.Difficulty, TimeSpan.FromSeconds(data.ElapsedSeconds));
+            List<Cage>? cages = null;
+            if (data.Cages.Count > 0)
+            {
+                cages = data.Cages
+                    .Select(cageData => new Cage(
+                        cageData.CellIndexes.Select(index => (index / Board.Size, index % Board.Size)).ToList(),
+                        cageData.TargetSum))
+                    .ToList();
+            }
+
+            return (puzzle, solution, data.Difficulty, data.Mode, cages, TimeSpan.FromSeconds(data.ElapsedSeconds));
         }
         catch
         {

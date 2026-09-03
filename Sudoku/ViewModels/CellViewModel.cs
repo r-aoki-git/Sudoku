@@ -12,11 +12,17 @@ public class CellViewModel : ViewModelBase
     public int Row { get; }
     public int Col { get; }
 
-    public CellViewModel(Cell cell, int row, int col)
+    public CellViewModel(Cell cell, int row, int col, CageCellInfo? cageInfo = null)
     {
         _cell = cell;
         Row = row;
         Col = col;
+
+        CageBorderTop = cageInfo?.BorderTop ?? false;
+        CageBorderBottom = cageInfo?.BorderBottom ?? false;
+        CageBorderLeft = cageInfo?.BorderLeft ?? false;
+        CageBorderRight = cageInfo?.BorderRight ?? false;
+        CageSumText = cageInfo?.SumText ?? "";
 
         for (int digit = 1; digit <= 9; digit++)
             Candidates.Add(new CandidateSlotViewModel(digit));
@@ -28,6 +34,21 @@ public class CellViewModel : ViewModelBase
     public int? Value => _cell.Value;
     public string DisplayText => _cell.HasValue ? _cell.Value!.Value.ToString() : string.Empty;
     public bool IsGiven => _cell.IsGiven;
+
+    ///<summary>キラーナンプレ：上辺がケージの境界かどうか</summary>
+    public bool CageBorderTop { get; }
+
+    ///<summary>キラーナンプレ：下辺がケージの境界かどうか</summary>
+    public bool CageBorderBottom { get; }
+
+    ///<summary>キラーナンプレ：左辺がケージの境界かどうか</summary>
+    public bool CageBorderLeft { get; }
+
+    ///<summary>キラーナンプレ：右辺がケージの境界かどうか</summary>
+    public bool CageBorderRight { get; }
+
+    ///<summary>キラーナンプレ：ケージ合計値ラベル（表示するマスのみ非空）</summary>
+    public string CageSumText { get; }
 
     /// <summary>候補値メモの3×3ミニグリッド</summary>
     public ObservableCollection<CandidateSlotViewModel> Candidates { get; } = new();
