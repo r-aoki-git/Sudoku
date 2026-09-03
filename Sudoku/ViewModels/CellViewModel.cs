@@ -19,6 +19,7 @@ public class CellViewModel : ViewModelBase
         Col = col;
 
         CageSumText = cageInfo?.SumText ?? "";
+        IsKillerCell = cageInfo is not null;
 
         for (int digit = 1; digit <= 9; digit++)
             Candidates.Add(new CandidateSlotViewModel(digit));
@@ -30,6 +31,17 @@ public class CellViewModel : ViewModelBase
     public int? Value => _cell.Value;
     public string DisplayText => _cell.HasValue ? _cell.Value!.Value.ToString() : string.Empty;
     public bool IsGiven => _cell.IsGiven;
+
+    ///<summary>
+    ///キラーナンプレの盤面のマスかどうか。キラーでは全マスがいずれかのケージに属するため、
+    ///81マスすべてでtrueになる（通常モードでは全マスfalse）。
+    ///
+    ///ケージ合計値は左上に描かれ、候補値メモの「1」の位置と重なるため、
+    ///キラーではメモの3×3グリッド全体を合計値ラベルの分だけ下げる。
+    ///合計値ラベルを持つマスだけを下げると、マスごとにメモの位置がずれて読みにくくなるので、
+    ///盤面全体で揃える。
+    ///</summary>
+    public bool IsKillerCell { get; }
 
     ///<summary>キラーナンプレ：ケージ合計値ラベル（表示するマスのみ非空）。
     ///ケージの枠線はマス単位ではなく、BoardViewModel.CageOutlineが盤面全体で1本のPathとして描く。</summary>

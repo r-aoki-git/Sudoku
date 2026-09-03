@@ -192,9 +192,21 @@
                                             <ItemsControl.Style>
                                                 <Style TargetType="ItemsControl">
                                                     <Setter Property="Visibility" Value="Visible"/>
+                                                    <Setter Property="Margin" Value="0"/>
                                                     <Style.Triggers>
                                                         <DataTrigger Binding="{Binding HasValue}" Value="True">
                                                             <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
+                                                        <!-- キラーナンプレ：ケージ合計値はマスの左上に描かれるため、
+                                                             そのままではメモの「1」と重なる。
+                                                             合計値ラベルの高さ分だけメモ全体を下げて場所を空ける。
+                                                             ラベルを持つマスだけを下げるとマスごとにメモの位置が
+                                                             ずれるので、盤面全体（＝キラーの全マス）で揃える。
+
+                                                             下側の余白は、ケージ枠線（マスの縁から3px内側）に
+                                                             最下段のメモが重ならないようにするためのもの。 -->
+                                                        <DataTrigger Binding="{Binding IsKillerCell}" Value="True">
+                                                            <Setter Property="Margin" Value="0,13,0,3"/>
                                                         </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
@@ -206,13 +218,18 @@
                                             </ItemsControl.ItemsPanel>
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border HorizontalAlignment="Center" VerticalAlignment="Center" Padding="4,1" CornerRadius="3">
+                                                    <Border HorizontalAlignment="Center" VerticalAlignment="Center" CornerRadius="3">
                                                         <Border.Style>
                                                             <Style TargetType="Border">
                                                                 <Setter Property="Background" Value="Transparent"/>
+                                                                <Setter Property="Padding" Value="4,1"/>
                                                                 <Style.Triggers>
                                                                     <DataTrigger Binding="{Binding IsHighlighted}" Value="True">
                                                                         <Setter Property="Background" Value="{StaticResource CandidateHighlightBackgroundBrush}"/>
+                                                                    </DataTrigger>
+                                                                    <!-- キラーは合計値ラベルの分だけメモの領域が狭いので、余白を詰める -->
+                                                                    <DataTrigger Binding="{Binding DataContext.IsKillerCell, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                                                                        <Setter Property="Padding" Value="3,0"/>
                                                                     </DataTrigger>
                                                                 </Style.Triggers>
                                                             </Style>
@@ -221,6 +238,10 @@
                                                             <TextBlock.Style>
                                                                 <Style TargetType="TextBlock" BasedOn="{StaticResource CandidateTextStyle}">
                                                                     <Style.Triggers>
+                                                                        <!-- 同上：キラーではメモの文字も1段小さくする -->
+                                                                        <DataTrigger Binding="{Binding DataContext.IsKillerCell, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                                                                            <Setter Property="FontSize" Value="10"/>
+                                                                        </DataTrigger>
                                                                         <DataTrigger Binding="{Binding IsHighlighted}" Value="True">
                                                                             <Setter Property="Foreground" Value="White"/>
                                                                             <Setter Property="FontWeight" Value="Bold"/>
