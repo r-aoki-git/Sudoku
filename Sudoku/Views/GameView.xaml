@@ -4,18 +4,7 @@
         xmlns:converters="clr-namespace:Sudoku.Views.Converters">
     <UserControl.Resources>
         <converters:BoxBorderThicknessConverter x:Key="BoxBorderThicknessConverter"/>
-        <converters:CageBorderThicknessConverter x:Key="CageBorderThicknessConverter"/>
 
-        <!-- キラーナンプレのケージ境界線（ダッシュ柄） -->
-        <DrawingBrush x:Key="CageBorderBrush" TileMode="Tile" Viewport="0,0,6,6" ViewportUnits="Absolute" Stretch="None">
-            <DrawingBrush.Drawing>
-                <GeometryDrawing Brush="#1F2937">
-                    <GeometryDrawing.Geometry>
-                        <RectangleGeometry Rect="0,0,3,3"/>
-                    </GeometryDrawing.Geometry>
-                </GeometryDrawing>
-            </DrawingBrush.Drawing>
-        </DrawingBrush>
 
         <!-- 盤面の配色調整 -->
         <SolidColorBrush x:Key="CellNormalBrush" Color="White"/>
@@ -259,19 +248,8 @@
                                             </Border.Style>
                                         </Border>
 
-                                        <!-- キラーナンプレ：ケージ境界線（ダッシュ柄、通常モードでは全辺Thickness＝０で非表示） -->
-                                        <Border Margin="3" IsHitTestVisible="False" BorderBrush="{StaticResource CageBorderBrush}">
-                                            <Border.BorderThickness>
-                                                <MultiBinding Converter="{StaticResource CageBorderThicknessConverter}">
-                                                    <Binding Path="CageBorderLeft"/>
-                                                    <Binding Path="CageBorderTop"/>
-                                                    <Binding Path="CageBorderRight"/>
-                                                    <Binding Path="CageBorderBottom"/>
-                                                </MultiBinding>
-                                            </Border.BorderThickness>
-                                        </Border>
-
-                                        <!-- キラーナンプレ：ケージ合計値レベル（左上のマスのみに表示される） -->
+                                        <!-- キラーナンプレ：ケージ合計値ラベル（ケージの左上のマスのみに表示される）。
+                                             ケージの枠線はマスごとではなく、盤面全体に重ねた1本のPathで描く（下部を参照）。 -->
                                             <TextBlock Text="{Binding CageSumText}" FontSize="11" FontWeight="Bold"
                                                    Foreground="#1F2937"
                                                    HorizontalAlignment="Left" VerticalAlignment="Top"
@@ -282,6 +260,19 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!-- キラーナンプレ：ケージの枠線。
+                     マスごとにBorderを置くと、破線柄の位相がマスの寸法に依存して
+                     辺ごとに濃さが変わってしまい、さらに同じケージの隣接マスの
+                     境目で線が途切れる。盤面全体で1本のGeometryにまとめることで、
+                     途切れのない均一な破線になる。
+                     幅・高さは上のUniformGridと必ず一致させること。 -->
+                <Path Data="{Binding Board.CageOutline}"
+                      Width="530" Height="530"
+                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Stroke="#1F2937" StrokeThickness="1.6"
+                      StrokeDashArray="2 2" StrokeDashCap="Flat"
+                      IsHitTestVisible="False"/>
             </Grid>
         </DockPanel>
 

@@ -18,10 +18,6 @@ public class CellViewModel : ViewModelBase
         Row = row;
         Col = col;
 
-        CageBorderTop = cageInfo?.BorderTop ?? false;
-        CageBorderBottom = cageInfo?.BorderBottom ?? false;
-        CageBorderLeft = cageInfo?.BorderLeft ?? false;
-        CageBorderRight = cageInfo?.BorderRight ?? false;
         CageSumText = cageInfo?.SumText ?? "";
 
         for (int digit = 1; digit <= 9; digit++)
@@ -35,19 +31,8 @@ public class CellViewModel : ViewModelBase
     public string DisplayText => _cell.HasValue ? _cell.Value!.Value.ToString() : string.Empty;
     public bool IsGiven => _cell.IsGiven;
 
-    ///<summary>キラーナンプレ：上辺がケージの境界かどうか</summary>
-    public bool CageBorderTop { get; }
-
-    ///<summary>キラーナンプレ：下辺がケージの境界かどうか</summary>
-    public bool CageBorderBottom { get; }
-
-    ///<summary>キラーナンプレ：左辺がケージの境界かどうか</summary>
-    public bool CageBorderLeft { get; }
-
-    ///<summary>キラーナンプレ：右辺がケージの境界かどうか</summary>
-    public bool CageBorderRight { get; }
-
-    ///<summary>キラーナンプレ：ケージ合計値ラベル（表示するマスのみ非空）</summary>
+    ///<summary>キラーナンプレ：ケージ合計値ラベル（表示するマスのみ非空）。
+    ///ケージの枠線はマス単位ではなく、BoardViewModel.CageOutlineが盤面全体で1本のPathとして描く。</summary>
     public string CageSumText { get; }
 
     /// <summary>候補値メモの3×3ミニグリッド</summary>

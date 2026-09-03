@@ -3,6 +3,8 @@ using System.Linq;
 using Sudoku.Models;
 using Sudoku.Models.Commands;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows;
 
 namespace Sudoku.ViewModels;
 
@@ -80,12 +82,13 @@ public class BoardViewModel : ViewModelBase
         _cages = cages;
 
         var cageInfoMap = BuildCageCellInfoMap(cages);
+        CageOutline = BuildCageOutline(cages);
 
         for (int r = 0; r < Board.Size; r++)
             for (int c = 0; c < Board.Size; c++)
             {
                 cageInfoMap.TryGetValue((r, c), out var cageInfo);
-                Cells.Add(new CellViewModel(_board.GetCell(r, c), r, c));
+                Cells.Add(new CellViewModel(_board.GetCell(r, c), r, c, cageInfo));
             }
         RefreshConflicts();
     }
@@ -359,19 +362,15 @@ public class BoardViewModel : ViewModelBase
         return boxRow1 == boxRow2 && boxCol1 == boxCol2;
     }
 
-    /// <summary>ケージ一覧から、各マスの境界線描画情報・合計値ラベルを1回だけ計算する</summary>
+    /// <summary>ケージ一覧から、各マスの合計値ラベルを1回だけ計算する</summary>
     private static Dictionary<(int Row, int Col), CageCellInfo> BuildCageCellInfoMap(List<Cage>? cages)
     {
         var map = new Dictionary<(int, int), CageCellInfo>();
         if (cages is null) return map;
 
-        var cageIndexByCell = new Dictionary<(int, int), int>();
-        for (int i = 0; i < cages.Count; i++)
-            foreach (var cell in cages[i].Cells)
-                cageIndexByCell[(cell.Row, cell.Col)] = i;
-
         foreach (var cage in cages)
         {
+            // 合計値は、そのケージの一番上の行の、一番左のマスに表示する。
             var labelCell = cage.Cells
                 .OrderBy(cell => cell.Row)
                 .ThenBy(cell => cell.Col)
@@ -379,24 +378,169 @@ public class BoardViewModel : ViewModelBase
 
             foreach (var (row, col) in cage.Cells)
             {
-                int myCageIndex = cageIndexByCell[(row, col)];
-
-                bool IsBorder(int r, int c)
-                {
-                    if (r < 0 || r >= Board.Size || c < 0 || c >= Board.Size) return true;
-                    return !cageIndexByCell.TryGetValue((r, c), out int otherIndex) || otherIndex != myCageIndex;
-                }
-
                 map[(row, col)] = new CageCellInfo()
                 {
-                    BorderTop = IsBorder(row - 1, col),
-                    BorderBottom = IsBorder(row + 1, col),
-                    BorderLeft = IsBorder(row, col - 1),
-                    BorderRight = IsBorder(row, col + 1),
-                    SumText = (row == labelCell.Row && col == labelCell.Col) ? cage.TargetSum.ToString() : ""
+                    SumText = (row == labelCell.Row && col == labelCell.Col)
+                        ? cage.TargetSum.ToString()
+                        : ""
                 };
             }
         }
+
         return map;
+    }
+
+    // ================================================================
+    // ケージの枠線
+    //
+    // 以前はマスごとにBorderを1つ置き、破線柄のDrawingBrushで枠を描いていたが、
+    // これには表示上の欠陥が2つあった。
+    //
+    //   1. タイル柄のブラシは「塗る領域の左上」を原点に敷き詰められるため、
+    //      右辺・下辺は柄の位相がマスの寸法に依存する。位相がずれた辺は
+    //      薄いグレーの線になったり、ほとんど消えたりしていた。
+    //   2. 各Borderが Margin=3 で内側に寄っているため、同じケージの
+    //      隣り合うマスの境目で線が途切れ、枠が破線ではなく「歯抜け」に見えていた。
+    //
+    // どちらもマス単位で描く限り避けられないため、盤面全体で1本のGeometryを
+    // 組み立て、9x9グリッドに重ねる1つのPathで描くように変更した。
+    // ================================================================
+
+    /// <summary>盤面（9x9グリッド）の描画サイズ。GameView.xamlのUniformGridと必ず一致させること。</summary>
+    private const double BoardRenderSize = 530.0;
+
+    /// <summary>ケージ枠線をマスの縁からどれだけ内側に描くか。</summary>
+    private const double CageOutlineInset = 3.0;
+
+    /// <summary>キラーナンプレのケージ枠線。通常モードではnull（Pathは何も描かない）。</summary>
+    public Geometry? CageOutline { get; }
+
+    /// <summary>
+    /// ケージ一覧から、盤面全体のケージ枠線を1本のGeometryとして組み立てる。
+    ///
+    /// 同じケージで連続する辺はまとめて1本の線分にするため、
+    /// 破線の位相が途中でリセットされず、枠が途切れない。
+    /// 角では、隣のマスが同じケージなら線分をInset分だけ外側へ伸ばして
+    /// 直交する線分と確実に交わるようにしている。
+    /// </summary>
+    private static Geometry? BuildCageOutline(List<Cage>? cages)
+    {
+        if (cages is null || cages.Count == 0)
+            return null;
+
+        var cageIndex = new int[Board.Size, Board.Size];
+
+        for (int r = 0; r < Board.Size; r++)
+            for (int c = 0; c < Board.Size; c++)
+                cageIndex[r, c] = -1;
+
+        for (int i = 0; i < cages.Count; i++)
+            foreach (var (row, col) in cages[i].Cells)
+                cageIndex[row, col] = i;
+
+        double cellSize = BoardRenderSize / Board.Size;
+
+        bool InCage(int r, int c, int cage) =>
+            r >= 0 && r < Board.Size &&
+            c >= 0 && c < Board.Size &&
+            cageIndex[r, c] == cage;
+
+        var geometry = new StreamGeometry();
+
+        using (var ctx = geometry.Open())
+        {
+            // ----- 横方向の辺（上辺・下辺） -----
+            for (int r = 0; r < Board.Size; r++)
+            {
+                foreach (bool isTop in new[] { true, false })
+                {
+                    int c = 0;
+
+                    while (c < Board.Size)
+                    {
+                        int cage = cageIndex[r, c];
+                        int neighborRow = isTop ? r - 1 : r + 1;
+
+                        if (cage < 0 || InCage(neighborRow, c, cage))
+                        {
+                            c++;
+                            continue;
+                        }
+
+                        // 同じケージで、同じ向きの境界が続く区間をまとめる。
+                        int start = c;
+                        while (c + 1 < Board.Size &&
+                               cageIndex[r, c + 1] == cage &&
+                               !InCage(neighborRow, c + 1, cage))
+                        {
+                            c++;
+                        }
+
+                        double y = isTop
+                            ? (r * cellSize) + CageOutlineInset
+                            : ((r + 1) * cellSize) - CageOutlineInset;
+
+                        double x0 = (start * cellSize) +
+                            (InCage(r, start - 1, cage) ? -CageOutlineInset : CageOutlineInset);
+
+                        double x1 = ((c + 1) * cellSize) +
+                            (InCage(r, c + 1, cage) ? CageOutlineInset : -CageOutlineInset);
+
+                        ctx.BeginFigure(new Point(x0, y), isFilled: false, isClosed: false);
+                        ctx.LineTo(new Point(x1, y), isStroked: true, isSmoothJoin: false);
+
+                        c++;
+                    }
+                }
+            }
+
+            // ----- 縦方向の辺（左辺・右辺） -----
+            for (int c = 0; c < Board.Size; c++)
+            {
+                foreach (bool isLeft in new[] { true, false })
+                {
+                    int r = 0;
+
+                    while (r < Board.Size)
+                    {
+                        int cage = cageIndex[r, c];
+                        int neighborCol = isLeft ? c - 1 : c + 1;
+
+                        if (cage < 0 || InCage(r, neighborCol, cage))
+                        {
+                            r++;
+                            continue;
+                        }
+
+                        int start = r;
+                        while (r + 1 < Board.Size &&
+                               cageIndex[r + 1, c] == cage &&
+                               !InCage(r + 1, neighborCol, cage))
+                        {
+                            r++;
+                        }
+
+                        double x = isLeft
+                            ? (c * cellSize) + CageOutlineInset
+                            : ((c + 1) * cellSize) - CageOutlineInset;
+
+                        double y0 = (start * cellSize) +
+                            (InCage(start - 1, c, cage) ? -CageOutlineInset : CageOutlineInset);
+
+                        double y1 = ((r + 1) * cellSize) +
+                            (InCage(r + 1, c, cage) ? CageOutlineInset : -CageOutlineInset);
+
+                        ctx.BeginFigure(new Point(x, y0), isFilled: false, isClosed: false);
+                        ctx.LineTo(new Point(x, y1), isStroked: true, isSmoothJoin: false);
+
+                        r++;
+                    }
+                }
+            }
+        }
+
+        geometry.Freeze();
+
+        return geometry;
     }
 }
